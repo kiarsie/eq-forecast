@@ -1,0 +1,24 @@
+# === DATA & RESULTS (KEEP LOCAL) ===
+data/
+results/
+
+# === PYTHON CACHE ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# === JUPYTER NOTEBOOK ===
+.ipynb_checkpoints/
+
+# === SYSTEM FILES ===
+.DS_Store
+Thumbs.db
+
+# === VIRTUAL ENV ===
+venv/
+.env
+
+# === LOGS & TEMP FILES ===
+*.log
+*.tmp
