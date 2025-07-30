@@ -1,5 +1,7 @@
 # === DATA & RESULTS (KEEP LOCAL) ===
 data/
+*.csv
+
 results/
 
 # === PYTHON CACHE ===
