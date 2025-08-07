@@ -1,6 +1,10 @@
 import sys
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
 sys.path.append('./')
-from src.models.earthquake_model import train_and_evaluate_lstm
+from src.preprocessing.load_catalog import load_catalog
+from src.models.LSTM_algo import train_and_evaluate_lstm
+from src.models.attention import run_attention_pipeline
 from src.preprocessing.load_catalog import load_catalog
 from src.binning.quadtree import apply_quadtree_binning, plot_quadtree_grid
 
@@ -17,6 +21,8 @@ filtered_catalog, region, bounds = apply_quadtree_binning(
 # --- Plot Result ---
 plot_quadtree_grid(filtered_catalog, bounds, original_catalog)
 
-
-#--- LSTM model ---
+# --- LSTM Model ---
 train_and_evaluate_lstm()
+
+# --- Attention ---
+run_attention_pipeline()
