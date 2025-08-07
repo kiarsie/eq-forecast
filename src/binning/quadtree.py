@@ -60,6 +60,37 @@ def extract_leaf_bounds(node):
     for child in node.children:
         bounds.extend(extract_leaf_bounds(child))
     return bounds
+#NEW FUNCTION
+def apply_quadtree(catalog, min_events=20, max_depth=4, min_bin_width=0.2):
+    lons = catalog["longitude"]
+    lats = catalog["latitude"]
+
+    min_lon, max_lon = lons.min(), lons.max()
+    min_lat, max_lat = lats.min(), lats.max()
+
+    root = QuadtreeNode((min_lon, max_lon, min_lat, max_lat))
+    build_quadtree(root, lons, lats, max_depth=max_depth, min_events=min_events)
+
+    bounds = extract_leaf_bounds(root)
+    filtered_bounds = []
+
+    for b in bounds:
+        width_lon = b[1] - b[0]
+        width_lat = b[3] - b[2]
+        if width_lon >= min_bin_width and width_lat >= min_bin_width:
+            filtered_bounds.append(b)
+
+    # Filter catalog events that fall into any valid bin
+    mask = np.zeros(len(lons), dtype=bool)
+    for b in filtered_bounds:
+        in_bin = (
+            (lons >= b[0]) & (lons < b[1]) &
+            (lats >= b[2]) & (lats < b[3])
+        )
+        mask |= in_bin
+
+    filtered_catalog = catalog.filter(mask)
+    return filtered_catalog, root, filtered_bounds
 
 #  APPLY QUADTREE BINNING TO CATALOG
 def apply_quadtree_binning(catalog, max_depth=4, min_events=10):
