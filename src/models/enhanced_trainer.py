@@ -420,7 +420,11 @@ class EnhancedQuadtreeTrainer:
                             # Create placeholder metrics for existing models
                             self.results[model_type]['frequency_models']['test_metrics'][bin_id] = {
                                 'loss': 0.0,  # Placeholder - we don't have actual test metrics
-                                'mae': 0.0
+                                'mae': 0.0,
+                                'mse': 0.0,
+                                'rmse': 0.0,
+                                'wmape': 0.0,
+                                'forecast_accuracy': 0.0
                             }
                             self.results[model_type]['frequency_models']['validation_metrics'][bin_id] = {
                                 'loss': 0.0,  # Placeholder - we don't have actual validation metrics
@@ -451,7 +455,11 @@ class EnhancedQuadtreeTrainer:
                             # Create placeholder metrics for existing models
                             self.results[model_type]['magnitude_models']['test_metrics'][bin_id] = {
                                 'loss': 0.0,  # Placeholder - we don't have actual test metrics
-                                'mae': 0.0
+                                'mae': 0.0,
+                                'mse': 0.0,
+                                'rmse': 0.0,
+                                'wmape': 0.0,
+                                'forecast_accuracy': 0.0
                             }
                             self.results[model_type]['magnitude_models']['validation_metrics'][bin_id] = {
                                 'loss': 0.0,  # Placeholder - we don't have actual validation metrics
@@ -796,9 +804,43 @@ class EnhancedQuadtreeTrainer:
                     outputs.cpu().numpy()
                 ))
         
+        # Calculate additional metrics for comprehensive evaluation
+        test_mae = np.mean(test_maes)
+        test_loss = np.mean(test_losses)
+        
+        # Collect all predictions and targets for additional metrics
+        all_predictions = []
+        all_targets = []
+        
+        model.eval()
+        with torch.no_grad():
+            for batch_X, batch_y, batch_metadata in test_loader:
+                batch_X = batch_X.to(self.device)
+                batch_y = batch_y.to(self.device)
+                
+                outputs = model(batch_X)
+                
+                # Ensure proper shape alignment
+                if outputs.dim() == 3:
+                    outputs = outputs.squeeze(1)
+                if batch_y.dim() == 3:
+                    batch_y = batch_y.squeeze(1)
+                
+                all_predictions.extend(outputs.cpu().numpy().flatten())
+                all_targets.extend(batch_y.cpu().numpy().flatten())
+        
+        # Convert to numpy arrays
+        all_predictions = np.array(all_predictions)
+        all_targets = np.array(all_targets)
+        
+        # Calculate comprehensive metrics
         test_metrics = {
-            'loss': np.mean(test_losses),
-            'mae': np.mean(test_maes)
+            'loss': test_loss,
+            'mae': test_mae,
+            'mse': np.mean((all_targets - all_predictions) ** 2),
+            'rmse': np.sqrt(np.mean((all_targets - all_predictions) ** 2)),
+            'wmape': np.sum(np.abs(all_targets - all_predictions)) / np.sum(np.abs(all_targets)) * 100,
+            'forecast_accuracy': 100 - (np.sum(np.abs(all_targets - all_predictions)) / np.sum(np.abs(all_targets)) * 100)
         }
         
         # Calculate validation metrics from the training history
@@ -992,6 +1034,156 @@ class EnhancedQuadtreeTrainer:
                 }
         
         return overall
+    
+    def clear_results(self):
+        """Clear all training results and reset the trainer to initial state."""
+        self.logger.info("Clearing all training results...")
+        
+        # Clear results dictionary
+        self.results = {}
+        
+        # Clear training history
+        self.training_history = {}
+        
+        # Reinitialize results structure
+        for model_type in self.model_types:
+            self.results[model_type] = {
+                'frequency_models': {'models': {}, 'training_history': {}, 'test_metrics': {}, 'validation_metrics': {}},
+                'magnitude_models': {'models': {}, 'training_history': {}, 'test_metrics': {}, 'validation_metrics': {}}
+            }
+        
+        # Clear any saved model files
+        if self.save_dir.exists():
+            for model_file in self.save_dir.glob("*.pth"):
+                try:
+                    model_file.unlink()
+                    self.logger.info(f"Deleted model file: {model_file}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to delete model file {model_file}: {e}")
+            
+            # Also clear results files
+            for results_file in self.save_dir.glob("*results*.json"):
+                try:
+                    results_file.unlink()
+                    self.logger.info(f"Deleted results file: {results_file}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to delete results file {results_file}: {e}")
+        
+        self.logger.info("All results cleared successfully!")
+    
+    def force_retrain(self):
+        """Force retraining of all models by clearing existing results and models."""
+        self.logger.info("Forcing retrain of all models...")
+        self.clear_results()
+        
+        # Also clear the data loader cache if it exists
+        if hasattr(self, 'data_loader') and hasattr(self.data_loader, 'clear_cache'):
+            self.data_loader.clear_cache()
+            self.logger.info("Data loader cache cleared.")
+        
+        self.logger.info("Ready for fresh training!")
+    
+    def list_existing_models(self):
+        """List all existing models in the save directory."""
+        if not self.save_dir.exists():
+            self.logger.info("Save directory does not exist.")
+            return
+        
+        model_files = list(self.save_dir.glob("*.pth"))
+        if not model_files:
+            self.logger.info("No existing models found.")
+            return
+        
+        self.logger.info(f"Found {len(model_files)} existing models:")
+        for model_file in sorted(model_files):
+            self.logger.info(f"  - {model_file.name}")
+        
+        return model_files
+    
+    def check_save_directory(self):
+        """Check what's in the save directory."""
+        if not self.save_dir.exists():
+            self.logger.info("Save directory does not exist.")
+            return
+        
+        # Check for model files
+        model_files = list(self.save_dir.glob("*.pth"))
+        self.logger.info(f"Save directory: {self.save_dir}")
+        self.logger.info(f"Model files: {len(model_files)}")
+        
+        # Check for results files
+        results_files = list(self.save_dir.glob("*results*.json"))
+        self.logger.info(f"Results files: {len(results_files)}")
+        
+        # Check for other files
+        other_files = [f for f in self.save_dir.iterdir() if f.is_file() and not f.name.endswith('.pth') and 'results' not in f.name]
+        if other_files:
+            self.logger.info(f"Other files: {len(other_files)}")
+            for f in other_files:
+                self.logger.info(f"  - {f.name}")
+        
+        return {
+            'models': model_files,
+            'results': results_files,
+            'other': other_files
+        }
+    
+    def get_training_summary(self):
+        """Get a summary of what models are available for training."""
+        summary = {
+            'total_models': 0,
+            'models_by_type': {},
+            'models_by_target': {'frequency': 0, 'magnitude': 0},
+            'missing_models': []
+        }
+        
+        if not self.save_dir.exists():
+            summary['status'] = 'No save directory'
+            return summary
+        
+        model_files = list(self.save_dir.glob("*.pth"))
+        summary['total_models'] = len(model_files)
+        
+        # Count models by type and target
+        for model_file in model_files:
+            parts = model_file.stem.split('_')
+            if len(parts) >= 3:
+                model_type = parts[0]  # simple or attention
+                target = parts[1]      # frequency or magnitude
+                bin_id = parts[-1]     # bin number
+                
+                if model_type not in summary['models_by_type']:
+                    summary['models_by_type'][model_type] = {'frequency': 0, 'magnitude': 0}
+                
+                summary['models_by_type'][model_type][target] += 1
+                summary['models_by_target'][target] += 1
+        
+        # Check what's missing
+        expected_bins = len(self.bin_ids) if hasattr(self, 'bin_ids') else 48  # Default to 48 bins
+        for model_type in self.model_types:
+            for target in ['frequency', 'magnitude']:
+                expected = expected_bins
+                actual = summary['models_by_type'].get(model_type, {}).get(target, 0)
+                if actual < expected:
+                    summary['missing_models'].append(f"{model_type}_{target}: {actual}/{expected}")
+        
+        summary['status'] = 'Complete' if not summary['missing_models'] else 'Incomplete'
+        return summary
+    
+    def check_existing_results(self):
+        """Check what existing results are available."""
+        if not self.results:
+            self.logger.info("No results loaded in memory.")
+            return
+        
+        self.logger.info("Existing results in memory:")
+        for model_type in self.model_types:
+            if model_type in self.results:
+                freq_models = len(self.results[model_type].get('frequency_models', {}).get('models', {}))
+                mag_models = len(self.results[model_type].get('magnitude_models', {}).get('models', {}))
+                self.logger.info(f"  {model_type}: {freq_models} frequency models, {mag_models} magnitude models")
+            else:
+                self.logger.info(f"  {model_type}: No results")
     
     def _save_results(self):
         """Save training results to files."""

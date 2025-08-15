@@ -32,7 +32,7 @@ sys.path.append(str(Path(__file__).parent / "src"))
 
 from src.preprocessing.earthquake_processor import EarthquakeProcessor
 from src.models.quadtree_trainer import QuadtreeModelTrainer
-from src.models.enhanced_trainer import train_enhanced_quadtree_models
+from src.models.enhanced_trainer import train_enhanced_quadtree_models, EnhancedQuadtreeTrainer
 
 
 def setup_logging(log_level: str = "INFO", log_file: str = None) -> logging.Logger:
@@ -130,7 +130,8 @@ def train_quadtree_models(data_path: str,
                           logger: logging.Logger,
                           model_types: List[str] = ['simple', 'attention'],
                           num_epochs: int = 100,
-                          patience: int = 20) -> dict:
+                          patience: int = 20,
+                          clear_existing: bool = False) -> dict:
     """
     Train quadtree-based LSTM models with enhanced capabilities.
     
@@ -154,6 +155,19 @@ def train_quadtree_models(data_path: str,
         # Use enhanced trainer for better model comparison
         if len(model_types) > 1 or 'both' in model_types:
             # Use enhanced trainer for multiple models
+            if clear_existing:
+                action = "Clearing existing results"
+                logger.info(f"{action} before training...")
+                # Create a temporary trainer to clear results
+                temp_trainer = EnhancedQuadtreeTrainer(
+                    data_path=data_path,
+                    save_dir=save_dir,
+                    logger=logger,
+                    model_types=model_types
+                )
+                temp_trainer.clear_results()
+                logger.info(f"{action} completed successfully!")
+            
             results = train_enhanced_quadtree_models(
                 data_path=data_path,
                 save_dir=save_dir,
@@ -409,6 +423,39 @@ def generate_visualizations(save_dir: str, logger: logging.Logger):
 
 def main():
     """Main function."""
+    
+    def get_data_path(mode, output_dir, input_data):
+        """Helper function to get the appropriate data path based on mode and available data."""
+        if mode == 'full_pipeline':
+            # For full pipeline, we expect the processed data to exist
+            processed_data_path = output_dir / "processed_earthquake_catalog.csv"
+            annual_stats_path = output_dir / "processed_earthquake_catalog_annual_stats.csv"
+            if annual_stats_path.exists():
+                return str(annual_stats_path)
+            elif processed_data_path.exists():
+                return str(processed_data_path)
+            else:
+                return input_data
+        else:
+            # Check if preprocessed data exists
+            annual_stats_path = output_dir / "processed_earthquake_catalog_annual_stats.csv"
+            if annual_stats_path.exists():
+                # Verify it has the required columns
+                try:
+                    import pandas as pd
+                    df = pd.read_csv(annual_stats_path)
+                    required_columns = ['bin_id', 'year', 'frequency', 'max_magnitude']
+                    missing_columns = [col for col in required_columns if col not in df.columns]
+                    if missing_columns:
+                        logger.warning(f"Preprocessed data missing required columns: {missing_columns}")
+                        return input_data
+                    return str(annual_stats_path)
+                except Exception as e:
+                    logger.warning(f"Error reading preprocessed data: {e}")
+                    return input_data
+            else:
+                return input_data
+    
     parser = argparse.ArgumentParser(
         description="Quadtree-based Earthquake Forecasting System"
     )
@@ -456,6 +503,26 @@ def main():
         help='Early stopping patience'
     )
     parser.add_argument(
+        '--clear_existing',
+        action='store_true',
+        help='Clear existing results and models before training'
+    )
+    parser.add_argument(
+        '--list_models',
+        action='store_true',
+        help='List existing models without training'
+    )
+    parser.add_argument(
+        '--force_retrain',
+        action='store_true',
+        help='Force retrain all models (equivalent to clear_existing)'
+    )
+    parser.add_argument(
+        '--show_summary',
+        action='store_true',
+        help='Show training summary without training'
+    )
+    parser.add_argument(
         '--log_level',
         type=str,
         default='INFO',
@@ -484,8 +551,81 @@ def main():
     logger.info(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     logger.info(f"Training epochs: {args.num_epochs}")
     logger.info(f"Early stopping patience: {args.patience}")
+    logger.info(f"Clear existing: {args.clear_existing}")
+    logger.info(f"Force retrain: {args.force_retrain}")
+    logger.info(f"List models: {args.list_models}")
+    logger.info(f"Show summary: {args.show_summary}")
     
     try:
+        # Handle standalone operations first (these should not trigger the pipeline)
+        if args.list_models:
+            # List existing models without training
+            logger.info("\n" + "="*50)
+            logger.info("LISTING EXISTING MODELS")
+            logger.info("="*50)
+            
+            results_dir = output_dir / "results"
+            if results_dir.exists():
+                # Create a temporary trainer to list models
+                # Use a dummy data path that exists to avoid initialization errors
+                dummy_data_path = output_dir / "processed_earthquake_catalog_annual_stats.csv"
+                if not dummy_data_path.exists():
+                    # If the processed data doesn't exist, use the raw data
+                    dummy_data_path = Path(args.input_data)
+                
+                temp_trainer = EnhancedQuadtreeTrainer(
+                    data_path=str(dummy_data_path),
+                    save_dir=str(results_dir),
+                    logger=logger,
+                    model_types=['simple', 'attention']
+                )
+                temp_trainer.check_save_directory()
+            else:
+                logger.info("No results directory found.")
+            
+            # Exit after listing models - don't continue with pipeline
+            logger.info("Model listing completed. Exiting.")
+            return
+        
+        if args.show_summary:
+            # Show training summary without training
+            logger.info("\n" + "="*50)
+            logger.info("TRAINING SUMMARY")
+            logger.info("="*50)
+            
+            results_dir = output_dir / "results"
+            if results_dir.exists():
+                # Create a temporary trainer to show summary
+                # Use a dummy data path that exists to avoid initialization errors
+                dummy_data_path = output_dir / "processed_earthquake_catalog_annual_stats.csv"
+                if not dummy_data_path.exists():
+                    # If the processed data doesn't exist, use the raw data
+                    dummy_data_path = Path(args.input_data)
+                
+                temp_trainer = EnhancedQuadtreeTrainer(
+                    data_path=str(dummy_data_path),
+                    save_dir=str(results_dir),
+                    logger=logger,
+                    model_types=['simple', 'attention']
+                )
+                summary = temp_trainer.get_training_summary()
+                logger.info(f"Training Status: {summary['status']}")
+                logger.info(f"Total Models: {summary['total_models']}")
+                logger.info("Models by Type:")
+                for model_type, targets in summary['models_by_type'].items():
+                    logger.info(f"  {model_type}: {targets['frequency']} frequency, {targets['magnitude']} magnitude")
+                if summary['missing_models']:
+                    logger.info("Missing Models:")
+                    for missing in summary['missing_models']:
+                        logger.info(f"  - {missing}")
+            else:
+                logger.info("No results directory found.")
+            
+            # Exit after showing summary - don't continue with pipeline
+            logger.info("Summary display completed. Exiting.")
+            return
+        
+        # Only proceed with pipeline operations if no standalone operations were requested
         if args.mode == 'preprocess' or args.mode == 'full_pipeline':
             # Step 1: Preprocessing
             logger.info("\n" + "="*50)
@@ -507,12 +647,19 @@ def main():
             logger.info("STEP 2: LSTM MODEL TRAINING")
             logger.info("="*50)
             
-            # Use annual statistics data path (contains max_magnitude, frequency columns)
-            if args.mode == 'full_pipeline':
-                data_path = str(processed_data_path).replace('.csv', '_annual_stats.csv')
+            # Get appropriate data path
+            data_path = get_data_path(args.mode, output_dir, args.input_data)
+            if data_path != args.input_data:
+                logger.info(f"Using preprocessed data: {data_path}")
+                # Verify the file exists
+                if not Path(data_path).exists():
+                    logger.error(f"Preprocessed data file not found: {data_path}")
+                    logger.error("Please run preprocessing first or use --mode full_pipeline")
+                    sys.exit(1)
             else:
-                # For train-only mode, expect processed data
-                data_path = args.input_data
+                logger.warning("No preprocessed data found. Please run preprocessing first or use --mode full_pipeline")
+                logger.error("Cannot proceed without preprocessed data")
+                sys.exit(1)
             
             results_dir = output_dir / "results"
             
@@ -522,13 +669,27 @@ def main():
             else:
                 model_types = [args.model_type]
             
+            # Handle force retrain if requested
+            if args.force_retrain:
+                logger.info("Force retraining all models...")
+                # Create a temporary trainer to force retrain
+                temp_trainer = EnhancedQuadtreeTrainer(
+                    data_path=data_path,
+                    save_dir=str(results_dir),
+                    logger=logger,
+                    model_types=model_types
+                )
+                temp_trainer.force_retrain()
+                logger.info("Force retrain completed - all existing models cleared!")
+            
             training_results = train_quadtree_models(
                 data_path=data_path,
                 save_dir=str(results_dir),
                 logger=logger,
                 model_types=model_types,
                 num_epochs=args.num_epochs,
-                patience=args.patience
+                patience=args.patience,
+                clear_existing=args.clear_existing
             )
             
             logger.info(f"Training results saved to: {results_dir}")
@@ -539,11 +700,8 @@ def main():
             logger.info("STEP 2.5: LSTM MODEL TESTING")
             logger.info("="*50)
             
-            # Use annual statistics data path
-            if args.mode == 'full_pipeline':
-                data_path = str(processed_data_path).replace('.csv', '_annual_stats.csv')
-            else:
-                data_path = args.input_data
+            # Get appropriate data path
+            data_path = get_data_path(args.mode, output_dir, args.input_data)
             
             results_dir = output_dir / "results"
             test_results = test_quadtree_models(
@@ -560,11 +718,8 @@ def main():
             logger.info("STEP 2.75: LSTM MODEL VALIDATION")
             logger.info("="*50)
             
-            # Use annual statistics data path
-            if args.mode == 'full_pipeline':
-                data_path = str(processed_data_path).replace('.csv', '_annual_stats.csv')
-            else:
-                data_path = args.input_data
+            # Get appropriate data path
+            data_path = get_data_path(args.mode, output_dir, args.input_data)
             
             results_dir = output_dir / "results"
             validation_results = validate_quadtree_models(
@@ -581,12 +736,8 @@ def main():
             logger.info("STEP 3: MODEL EVALUATION")
             logger.info("="*50)
             
-            # Use annual statistics data path (contains max_magnitude, frequency columns)
-            if args.mode == 'full_pipeline':
-                data_path = str(processed_data_path).replace('.csv', '_annual_stats.csv')
-            else:
-                # For evaluate-only mode, expect processed data
-                data_path = args.input_data
+            # Get appropriate data path
+            data_path = get_data_path(args.mode, output_dir, args.input_data)
             
             results_dir = output_dir / "results"
             evaluation_results = evaluate_quadtree_models(
@@ -621,6 +772,8 @@ def main():
             logger.info("3. ✅ Evaluated model performance using WMAPE and Forecast Accuracy")
             logger.info("4. ✅ Generated comprehensive visualizations")
             logger.info("\nYou can now analyze the results in the output directory!")
+        
+        return
         
     except Exception as e:
         logger.error(f"An error occurred: {e}")
