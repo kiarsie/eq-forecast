@@ -1,26 +1,110 @@
-# === DATA & RESULTS (KEEP LOCAL) ===
-data/
-*.csv
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+eq-env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+notebooks/
+
+# Logs
+*.log
+forecasting_pipeline.log
+earthquake_forecasting.log
+
+# Data files (too large for GitHub)
+data/
+output/
 results/
 
-# === PYTHON CACHE ===
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+# Trained models (very large)
+*.pth
+*.pt
+*.pkl
+*.h5
+*.hdf5
 
-# === JUPYTER NOTEBOOK ===
-.ipynb_checkpoints/
+# Plots and visualizations
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.svg
 
-# === SYSTEM FILES ===
+# Processed earthquake data
+*.csv
+processed_earthquake_catalog*.csv
+
+# Configuration files with sensitive data
+config.json
+.env
+.secrets
+
+# OS generated files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
 
-# === VIRTUAL ENV ===
-venv/
-.env
-
-# === LOGS & TEMP FILES ===
-*.log
+# Temporary files
 *.tmp
+*.temp
+*.bak
+*.backup
+
+# Training checkpoints
+checkpoints/
+saved_models/
+runs/
+logs/
+
+# Cache
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Documentation builds
+docs/_build/
+site/
+
+# Distribution
+dist/
+build/
+*.egg-info/
