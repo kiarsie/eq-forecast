@@ -1,1 +1,0 @@
-#Function that puts weight on past events. It is a means of making each one unequal. 

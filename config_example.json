@@ -1,0 +1,44 @@
+{
+  "system_config": {
+    "description": "Configuration for Quadtree-based Earthquake Forecasting System",
+    "version": "1.0.0"
+  },
+  "preprocessing": {
+    "min_depth_km": 70.0,
+    "lookback_years": 10,
+    "target_horizon": 1,
+    "save_processed_data": true
+  },
+  "model_architecture": {
+    "hidden_sizes": [120, 90, 30, 30],
+    "dropout": 0.2,
+    "bidirectional": false,
+    "activation": "sigmoid"
+  },
+  "training": {
+    "batch_size": 32,
+    "learning_rate": 0.001,
+    "num_epochs": 100,
+    "patience": 20,
+    "optimizer": "adam",
+    "loss_function": "mse"
+  },
+  "data_split": {
+    "train_ratio": 0.7,
+    "val_ratio": 0.15,
+    "test_ratio": 0.15,
+    "shuffle": true,
+    "normalize": true
+  },
+  "evaluation": {
+    "metrics": ["mse", "mae", "wmape", "forecast_accuracy"],
+    "save_predictions": true,
+    "generate_visualizations": true
+  },
+  "output": {
+    "save_dir": "results",
+    "save_models": true,
+    "save_results": true,
+    "log_level": "INFO"
+  }
+} 
