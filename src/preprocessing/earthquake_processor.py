@@ -184,9 +184,93 @@ class EarthquakeProcessor:
         # Sort by year and bin_id
         annual_stats = annual_stats.sort_values(['year', 'bin_id']).reset_index(drop=True)
         
+        # Apply zero-filling strategy from the paper: fill missing years with last non-zero value
+        annual_stats = self._apply_zero_filling_strategy(annual_stats)
+        
         self.logger.info(f"Computed annual statistics for {len(annual_stats)} year-bin combinations")
         
         return annual_stats
+    
+    def _apply_zero_filling_strategy(self, annual_stats: pd.DataFrame) -> pd.DataFrame:
+        """
+        Apply zero-filling strategy from the paper: fill missing years with last non-zero value.
+        
+        This addresses the paper's observation that "zero values" make training very difficult.
+        For missing years in a bin's timeline, we fill with the last non-zero values.
+        
+        Args:
+            annual_stats: DataFrame with annual statistics per bin
+            
+        Returns:
+            DataFrame with missing years filled using forward-fill strategy
+        """
+        self.logger.info("Applying zero-filling strategy for missing years")
+        
+        # Get overall year range
+        min_year = annual_stats['year'].min()
+        max_year = annual_stats['year'].max()
+        unique_bins = annual_stats['bin_id'].unique()
+        
+        # Create complete year-bin combinations
+        all_years = list(range(min_year, max_year + 1))
+        filled_data = []
+        
+        for bin_id in unique_bins:
+            bin_data = annual_stats[annual_stats['bin_id'] == bin_id].copy()
+            bin_data = bin_data.sort_values('year').reset_index(drop=True)
+            
+            # Create complete timeline for this bin
+            for year in all_years:
+                existing_row = bin_data[bin_data['year'] == year]
+                
+                if not existing_row.empty:
+                    # Year exists, use actual data
+                    filled_data.append(existing_row.iloc[0].to_dict())
+                else:
+                    # Year missing, need to fill
+                    # Find the last non-zero value before this year
+                    previous_data = bin_data[bin_data['year'] < year]
+                    
+                    if not previous_data.empty:
+                        # Use forward-fill: copy the last available values
+                        last_row = previous_data.iloc[-1].to_dict()
+                        last_row['year'] = year  # Update year to current
+                        
+                        # Apply zero-filling logic from paper:
+                        # "zero values were filled with a value equal to the last non-zero value"
+                        # Only fill if the last value was non-zero for frequency
+                        if last_row.get('frequency', 0) > 0:
+                            filled_data.append(last_row)
+                        else:
+                            # If last value was also zero, create minimal entry
+                            filled_data.append({
+                                'year': year,
+                                'bin_id': bin_id,
+                                'max_magnitude': 0.0,
+                                'avg_magnitude': 0.0,
+                                'avg_depth': last_row.get('avg_depth', 10.0),  # Use reasonable default
+                                'frequency': 0
+                            })
+                    else:
+                        # No previous data available, create minimal entry
+                        filled_data.append({
+                            'year': year,
+                            'bin_id': bin_id,
+                            'max_magnitude': 0.0,
+                            'avg_magnitude': 0.0,
+                            'avg_depth': 10.0,  # Default shallow depth
+                            'frequency': 0
+                        })
+        
+        # Convert back to DataFrame
+        filled_df = pd.DataFrame(filled_data)
+        filled_df = filled_df.sort_values(['year', 'bin_id']).reset_index(drop=True)
+        
+        original_rows = len(annual_stats)
+        filled_rows = len(filled_df)
+        self.logger.info(f"Zero-filling: {original_rows} original rows → {filled_rows} filled rows")
+        
+        return filled_df
     
     def prepare_lstm_data(self, annual_stats: pd.DataFrame, lookback_years: int = 10) -> pd.DataFrame:
         """

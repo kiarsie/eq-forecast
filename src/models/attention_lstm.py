@@ -28,8 +28,8 @@ class AttentionLSTM(nn.Module):
     
     def __init__(self, 
                  input_size: int,
-                 hidden_sizes: Tuple[int, int, int, int] = (120, 90, 30, 30),
-                 dropout: float = 0.2,
+                 hidden_sizes: Tuple[int, int, int, int] = (32, 32, 16, 16),
+                 dropout: float = 0.3,
                  bidirectional: bool = False):
         """
         Initialize the Attention LSTM model.
@@ -191,7 +191,8 @@ class AttentionLSTM(nn.Module):
         # Pass through output layer (2 neurons for frequency and magnitude)
         output = self.output_layer(pooled_output)
         
-        # No sigmoid activation for regression output
+        # Apply sigmoid activation as per the paper
+        output = torch.sigmoid(output)
         return output
     
     def forward_with_attention(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -234,7 +235,8 @@ class AttentionLSTM(nn.Module):
         
         # Output layer
         output = self.output_layer(pooled_output)
-        # No sigmoid activation for regression output
+        # Apply sigmoid activation as per the paper
+        output = torch.sigmoid(output)
         
         return output, attention_weights
     

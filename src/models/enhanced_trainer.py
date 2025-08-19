@@ -44,10 +44,10 @@ class EnhancedQuadtreeTrainer:
                  save_dir: str,
                  logger: logging.Logger,
                  model_types: List[str] = ['simple', 'attention'],
-                 hidden_sizes: Tuple[int, int, int, int] = (120, 90, 30, 30),
+                 hidden_sizes: Tuple[int, int, int, int] = (64, 48, 24, 24),  # Balanced capacity
                  lookback_years: int = 10,
                  num_epochs: int = 100,
-                 patience: int = 20,
+                 patience: int = 15,  # Increased patience for better convergence
                  batch_size: int = 32,
                  learning_rate: float = 0.001,
                  device: str = None):
@@ -363,8 +363,8 @@ class EnhancedQuadtreeTrainer:
             # Extract bin IDs from filenames
             for file_path in freq_files + mag_files:
                 try:
-                    # Extract bin ID from filename like "simple_frequency_bin_5.pth"
-                    bin_id = int(file_path.stem.split('_')[-1])
+                    # Extract bin ID from filename like "simple_frequency_bin_5.pth" or "simple_frequency_bin_-1.0.pth"
+                    bin_id = int(float(file_path.stem.split('_')[-1]))
                     if bin_id not in existing_models[model_type]:
                         existing_models[model_type].append(bin_id)
                 except (ValueError, IndexError):
@@ -616,13 +616,13 @@ class EnhancedQuadtreeTrainer:
             model = SimpleLSTM(
                 input_size=input_size,
                 hidden_sizes=self.hidden_sizes,
-                dropout=0.2
+                dropout=0.2  # Reduced dropout for better capacity utilization
             )
         elif model_type == 'attention':
             model = AttentionLSTM(
                 input_size=input_size,
                 hidden_sizes=self.hidden_sizes,
-                dropout=0.2
+                dropout=0.2  # Reduced dropout for better capacity utilization
             )
         else:
             raise ValueError(f"Unknown model type: {model_type}")
@@ -653,7 +653,7 @@ class EnhancedQuadtreeTrainer:
         """
         # Setup training
         criterion = nn.MSELoss()
-        optimizer = optim.Adam(model.parameters(), lr=self.learning_rate)
+        optimizer = optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
         
         # Training loop
@@ -1174,16 +1174,21 @@ class EnhancedQuadtreeTrainer:
         """Check what existing results are available."""
         if not self.results:
             self.logger.info("No results loaded in memory.")
-            return
+            return False
         
         self.logger.info("Existing results in memory:")
+        total_models = 0
         for model_type in self.model_types:
             if model_type in self.results:
                 freq_models = len(self.results[model_type].get('frequency_models', {}).get('models', {}))
                 mag_models = len(self.results[model_type].get('magnitude_models', {}).get('models', {}))
+                total_models += freq_models + mag_models
                 self.logger.info(f"  {model_type}: {freq_models} frequency models, {mag_models} magnitude models")
             else:
                 self.logger.info(f"  {model_type}: No results")
+        
+        # Return True if we have any models, False otherwise
+        return total_models > 0
     
     def _save_results(self):
         """Save training results to files."""
@@ -1232,11 +1237,176 @@ class EnhancedQuadtreeTrainer:
         
         self.logger.info(f"Results saved to: {self.save_dir}")
     
+    def _generate_comparison_results(self):
+        """Generate comparison results from evaluation results."""
+        if not self.results:
+            self.logger.warning("No results available for comparison")
+            return
+        
+        self.logger.info("Generating comparison results...")
+        
+        # Initialize comparison structure
+        self.results['comparison'] = {
+            'frequency': {},
+            'magnitude': {}
+        }
+        
+        metrics = ['mae', 'mse', 'rmse', 'wmape', 'forecast_accuracy']
+        targets = ['frequency', 'magnitude']
+        
+        for target in targets:
+            for metric in metrics:
+                # Collect values for each model type
+                simple_values = []
+                attention_values = []
+                
+                # Extract values from results - look for the new structure
+                for bin_id in self.results.get('simple', {}).get(f'{target}_models', {}).get('test_metrics', {}):
+                    if metric in self.results['simple'][f'{target}_models']['test_metrics'][bin_id]:
+                        # Skip placeholder metrics (0.0 values indicate loaded models without real metrics)
+                        value = self.results['simple'][f'{target}_models']['test_metrics'][bin_id][metric]
+                        if value > 0.0:  # Only include real metrics
+                            simple_values.append(value)
+                
+                for bin_id in self.results.get('attention', {}).get(f'{target}_models', {}).get('test_metrics', {}):
+                    if metric in self.results['attention'][f'{target}_models']['test_metrics'][bin_id]:
+                        # Skip placeholder metrics (0.0 values indicate loaded models without real metrics)
+                        value = self.results['attention'][f'{target}_models']['test_metrics'][bin_id][metric]
+                        if value > 0.0:  # Only include real metrics
+                            attention_values.append(value)
+                
+                if simple_values and attention_values:
+                    # Calculate statistics
+                    simple_mean = np.mean(simple_values)
+                    simple_std = np.std(simple_values)
+                    attention_mean = np.mean(attention_values)
+                    attention_std = np.std(attention_values)
+                    
+                    # Calculate improvement
+                    improvement = attention_mean - simple_mean
+                    if simple_mean != 0:
+                        improvement_pct = (improvement / simple_mean) * 100
+                    else:
+                        improvement_pct = 0
+                    
+                    self.results['comparison'][target][metric] = {
+                        'simple_mean': simple_mean,
+                        'simple_std': simple_std,
+                        'attention_mean': attention_mean,
+                        'attention_std': attention_std,
+                        'improvement': improvement,
+                        'improvement_pct': improvement_pct
+                    }
+                else:
+                    self.logger.warning(f"No data available for {target} {metric} comparison")
+        
+        self.logger.info("Comparison results generated successfully")
+        
+        # If we still don't have comparison results, try to generate them from the evaluation results
+        if not any(self.results['comparison'].values()):
+            self.logger.info("No comparison results from training - attempting to generate from evaluation results...")
+            self._generate_comparison_from_evaluation()
+    
+    def _generate_comparison_from_evaluation(self):
+        """
+        Generate comparison results from evaluation results if training results are not available.
+        This method assumes the evaluation results are already loaded in self.results.
+        """
+        if not self.results:
+            self.logger.warning("No evaluation results available to generate comparison.")
+            return
+        
+        self.logger.info("Generating comparison results from evaluation results...")
+        
+        # Initialize comparison structure
+        self.results['comparison'] = {
+            'frequency': {},
+            'magnitude': {}
+        }
+        
+        metrics = ['mae', 'mse', 'rmse', 'wmape', 'forecast_accuracy']
+        targets = ['frequency', 'magnitude']
+        
+        for target in targets:
+            for metric in metrics:
+                # Collect values for each model type
+                simple_values = []
+                attention_values = []
+                
+                # Extract values from results - look for the evaluation results structure
+                for bin_id in self.results:
+                    # Convert bin_id to string for consistent handling
+                    bin_id_str = str(bin_id)
+                    if bin_id_str.isdigit() or bin_id_str == '-1':  # Valid bin IDs
+                        simple_key = f'simple_{target}'
+                        attention_key = f'attention_{target}'
+                        
+                        # Check if simple model results exist for this bin
+                        if (simple_key in self.results[bin_id] and 
+                            metric in self.results[bin_id][simple_key]):
+                            value = self.results[bin_id][simple_key][metric]
+                            if isinstance(value, (int, float)) and value > 0.0:  # Only include real metrics
+                                simple_values.append(value)
+                        
+                        # Check if attention model results exist for this bin
+                        if (attention_key in self.results[bin_id] and 
+                            metric in self.results[bin_id][attention_key]):
+                            value = self.results[bin_id][attention_key][metric]
+                            if isinstance(value, (int, float)) and value > 0.0:  # Only include real metrics
+                                attention_values.append(value)
+                
+                if simple_values and attention_values:
+                    # Calculate statistics
+                    simple_mean = np.mean(simple_values)
+                    simple_std = np.std(simple_values)
+                    attention_mean = np.mean(attention_values)
+                    attention_std = np.std(attention_values)
+                    
+                    # Calculate improvement
+                    improvement = attention_mean - simple_mean
+                    if simple_mean != 0:
+                        improvement_pct = (improvement / simple_mean) * 100
+                    else:
+                        improvement_pct = 0
+                    
+                    self.results['comparison'][target][metric] = {
+                        'simple_mean': simple_mean,
+                        'simple_std': simple_std,
+                        'attention_mean': attention_mean,
+                        'attention_std': attention_std,
+                        'improvement': improvement,
+                        'improvement_pct': improvement_pct
+                    }
+                else:
+                    self.logger.warning(f"No data available for {target} {metric} comparison from evaluation results")
+        
+        self.logger.info("Comparison results generated successfully from evaluation results")
+    
     def _generate_comparison_plots(self):
         """Generate comparison plots between models."""
-        # Check if comparison results exist
+        # Check if comparison results exist, if not, generate them
         if 'comparison' not in self.results or not self.results['comparison']:
-            self.logger.warning("No comparison results available - skipping comparison plots")
+            self.logger.info("No comparison results found - generating from evaluation results...")
+            self._generate_comparison_results()
+        
+        # Check again after generation
+        if 'comparison' not in self.results or not self.results['comparison']:
+            self.logger.warning("Still no comparison results available - skipping comparison plots")
+            return
+        
+        # Check if we have any meaningful comparison data
+        has_data = False
+        for target in ['frequency', 'magnitude']:
+            if target in self.results['comparison'] and self.results['comparison'][target]:
+                for metric in self.results['comparison'][target]:
+                    if self.results['comparison'][target][metric]:
+                        has_data = True
+                        break
+                if has_data:
+                    break
+        
+        if not has_data:
+            self.logger.warning("No meaningful comparison data available - skipping comparison plots")
             return
         
         # Create subplot grid that can accommodate all metrics
@@ -1252,7 +1422,8 @@ class EnhancedQuadtreeTrainer:
                 ax = axes[i, j]
                 
                 if (target in self.results['comparison'] and 
-                    metric in self.results['comparison'][target]):
+                    metric in self.results['comparison'][target] and
+                    self.results['comparison'][target][metric]):
                     comp = self.results['comparison'][target][metric]
                     
                     models = ['Simple LSTM', 'Attention LSTM']
@@ -1280,6 +1451,285 @@ class EnhancedQuadtreeTrainer:
         plt.close()
         
         self.logger.info("Comparison plots generated")
+    
+    def _load_existing_models_from_files(self):
+        """
+        Load existing trained models from saved .pth files.
+        This method scans the save directory for model files and loads them.
+        """
+        self.logger.info("Scanning for existing trained models...")
+        
+        # Ensure results structure is properly initialized
+        for model_type in self.model_types:
+            if model_type not in self.results:
+                self.results[model_type] = {
+                    'frequency_models': {'models': {}, 'training_history': {}, 'test_metrics': {}, 'validation_metrics': {}},
+                    'magnitude_models': {'models': {}, 'training_history': {}, 'test_metrics': {}, 'validation_metrics': {}}
+                }
+            else:
+                # Ensure all required keys exist
+                if 'frequency_models' not in self.results[model_type]:
+                    self.results[model_type]['frequency_models'] = {'models': {}, 'training_history': {}, 'test_metrics': {}, 'validation_metrics': {}}
+                if 'magnitude_models' not in self.results[model_type]:
+                    self.results[model_type]['magnitude_models'] = {'models': {}, 'training_history': {}, 'test_metrics': {}, 'validation_metrics': {}}
+                
+                # Ensure 'models' key exists in each
+                if 'models' not in self.results[model_type]['frequency_models']:
+                    self.results[model_type]['frequency_models']['models'] = {}
+                if 'models' not in self.results[model_type]['magnitude_models']:
+                    self.results[model_type]['magnitude_models']['models'] = {}
+        
+        # Check both the current save_dir and the data/results directory where models might be saved
+        search_dirs = [self.save_dir]
+        
+        # Also check data/results directory if it exists and is different from save_dir
+        data_results_dir = Path("data/results")
+        if data_results_dir.exists() and data_results_dir != self.save_dir:
+            search_dirs.append(data_results_dir)
+        
+        loaded_models = {}
+        
+        for model_type in self.model_types:
+            # Scan for frequency models
+            for search_dir in search_dirs:
+                freq_pattern = f"{model_type}_frequency_bin_*.pth"
+                freq_files = list(search_dir.glob(freq_pattern))
+                
+                for freq_file in freq_files:
+                    # Extract bin_id from filename
+                    bin_id = int(float(freq_file.stem.split('_')[-1]))
+                    
+                    try:
+                        # Create model with correct architecture
+                        input_size = 2  # Default for your data
+                        model = self._create_model(model_type, input_size)
+                        model.load_state_dict(torch.load(freq_file, map_location=self.device))
+                        self.results[model_type]['frequency_models']['models'][bin_id] = model
+                        
+                        self.logger.info(f"✅ Loaded {model_type} frequency model for bin {bin_id} from {freq_file}")
+                        loaded_models[f"{model_type}_frequency_bin_{bin_id}"] = True
+                        
+                    except Exception as e:
+                        self.logger.warning(f"Failed to load {model_type} frequency model for bin {bin_id} from {freq_file}: {e}")
+            
+            # Scan for magnitude models
+            for search_dir in search_dirs:
+                mag_pattern = f"{model_type}_magnitude_bin_*.pth"
+                mag_files = list(search_dir.glob(mag_pattern))
+                
+                for mag_file in mag_files:
+                    # Extract bin_id from filename
+                    bin_id = int(float(mag_file.stem.split('_')[-1]))
+                    
+                    try:
+                        # Create model with correct architecture
+                        input_size = 2  # Default for your data
+                        model = self._create_model(model_type, input_size)
+                        model.load_state_dict(torch.load(mag_file, map_location=self.device))
+                        self.results[model_type]['magnitude_models']['models'][bin_id] = model
+                        
+                        self.logger.info(f"✅ Loaded {model_type} magnitude model for bin {bin_id} from {mag_file}")
+                        loaded_models[f"{model_type}_magnitude_bin_{bin_id}"] = True
+                        
+                    except Exception as e:
+                        self.logger.warning(f"Failed to load {model_type} magnitude model for bin {bin_id} from {mag_file}: {e}")
+        
+        total_loaded = len(loaded_models)
+        self.logger.info(f"Loaded {total_loaded} trained models from files")
+        
+        if total_loaded == 0:
+            self.logger.warning("No trained models found in any directory!")
+        else:
+            self.logger.info(f"Successfully loaded models: {list(loaded_models.keys())}")
+    
+    def evaluate_all_models(self) -> Dict:
+        """
+        Evaluate all trained models for all bins and targets.
+        
+        Returns:
+            Dictionary containing evaluation results for all bins
+        """
+        self.logger.info("Starting evaluation of all trained models...")
+        
+        evaluation_results = {}
+        
+        # Get all available bin IDs from the data
+        bin_ids = self.data_loader.get_bin_ids()
+        self.logger.info(f"Raw bin IDs from data loader: {bin_ids}")
+        
+        # Convert numpy types to Python types and filter out invalid bin IDs
+        valid_bin_ids = [int(bid) for bid in bin_ids if int(bid) >= 0]
+        if len(valid_bin_ids) != len(bin_ids):
+            invalid_bins = [int(bid) for bid in bin_ids if int(bid) < 0]
+            self.logger.warning(f"Found invalid bin IDs: {invalid_bins}")
+            self.logger.warning(f"Proceeding with valid bins: {valid_bin_ids}")
+        
+        total_bins = len(valid_bin_ids)
+        for i, bin_id in enumerate(valid_bin_ids):
+            self.logger.info(f"Evaluating bin {bin_id} ({i+1}/{total_bins})")
+            bin_results = {}
+            
+            # Evaluate frequency models
+            for model_type in self.model_types:
+                if (model_type in self.results and 
+                    'frequency_models' in self.results[model_type] and
+                    'models' in self.results[model_type]['frequency_models'] and
+                    bin_id in self.results[model_type]['frequency_models']['models']):
+                    
+                    model = self.results[model_type]['frequency_models']['models'][bin_id]
+                    freq_results = self._evaluate_single_model_for_bin(model, bin_id, 'frequency')
+                    # Store with proper key structure for comparison
+                    bin_results[f'{model_type}_frequency'] = freq_results
+            
+            # Evaluate magnitude models
+            for model_type in self.model_types:
+                if (model_type in self.results and 
+                    'magnitude_models' in self.results[model_type] and
+                    'models' in self.results[model_type]['magnitude_models'] and
+                    bin_id in self.results[model_type]['magnitude_models']['models']):
+                    
+                    model = self.results[model_type]['magnitude_models']['models'][bin_id]
+                    mag_results = self._evaluate_single_model_for_bin(model, bin_id, 'magnitude')
+                    # Store with proper key structure for comparison
+                    bin_results[f'{model_type}_magnitude'] = mag_results
+            
+            if bin_results:
+                evaluation_results[bin_id] = bin_results
+                self.logger.info(f"✅ Completed evaluation for bin {bin_id}")
+            else:
+                self.logger.warning(f"⚠️  No models found for bin {bin_id}")
+                evaluation_results[bin_id] = {'error': 'No models found'}
+        
+        # Save evaluation results
+        self._save_evaluation_results(evaluation_results)
+        
+        return evaluation_results
+    
+    def _evaluate_single_model_for_bin(self, model: nn.Module, bin_id: int, target: str) -> Dict:
+        """
+        Evaluate a single model for a specific bin and target.
+        
+        Args:
+            model: Model to evaluate
+            bin_id: ID of the quadtree bin
+            target: Target type ('frequency' or 'magnitude')
+            
+        Returns:
+            Evaluation results
+        """
+        model.eval()
+        
+        # Get test data for this bin
+        bin_loaders = self.data_loader.get_bin_loaders()
+        if bin_id not in bin_loaders:
+            return {'error': f'No data found for bin {bin_id}'}
+        
+        _, _, test_loader = bin_loaders[bin_id]
+        
+        predictions = []
+        actuals = []
+        
+        with torch.no_grad():
+            for inputs, targets, metadata in test_loader:
+                inputs = inputs.to(self.device)
+                targets = targets.to(self.device)
+                
+                outputs = model(inputs)
+                
+                # Ensure proper shape alignment
+                if outputs.dim() == 3:
+                    outputs = outputs.squeeze(1)
+                if targets.dim() == 3:
+                    targets = targets.squeeze(1)
+                
+                # Convert to numpy
+                pred_np = outputs.cpu().numpy().flatten()
+                target_np = targets.cpu().numpy().flatten()
+                
+                predictions.extend(pred_np)
+                actuals.extend(target_np)
+        
+        # Convert to numpy arrays
+        predictions = np.array(predictions)
+        actuals = np.array(actuals)
+        
+        # Calculate metrics
+        mse = np.mean((actuals - predictions) ** 2)
+        mae = np.mean(np.abs(actuals - predictions))
+        rmse = np.sqrt(mse)
+        
+        # Calculate WMAPE
+        absolute_errors = np.abs(actuals - predictions)
+        absolute_actuals = np.abs(actuals)
+        
+        if np.sum(absolute_actuals) == 0:
+            wmape = 0.0
+        else:
+            wmape = (np.sum(absolute_errors) / np.sum(absolute_actuals)) * 100
+        
+        forecast_accuracy = 100.0 - wmape
+        
+        return {
+            'mse': mse,
+            'mae': mae,
+            'rmse': rmse,
+            'wmape': wmape,
+            'forecast_accuracy': forecast_accuracy,
+            'predictions': predictions.tolist(),
+            'actuals': actuals.tolist()
+        }
+    
+    def _save_evaluation_results(self, results: Dict):
+        """Save evaluation results to file."""
+        results_path = self.save_dir / "evaluation_results.json"
+        
+        with open(results_path, 'w') as f:
+            json.dump(results, f, indent=2, default=str)
+        
+        self.logger.info(f"Evaluation results saved to {results_path}")
+        
+        # Also merge evaluation results into the main results structure for comparison
+        self._merge_evaluation_results(results)
+    
+    def _merge_evaluation_results(self, evaluation_results: Dict):
+        """
+        Merge evaluation results into the main results structure for comparison.
+        
+        Args:
+            evaluation_results: Dictionary containing evaluation results for all bins
+        """
+        self.logger.info("Merging evaluation results into main results structure...")
+        
+        merged_count = 0
+        for bin_id, bin_results in evaluation_results.items():
+            if 'error' in bin_results:
+                continue
+                
+            for model_key, model_results in bin_results.items():
+                if 'error' in model_results:
+                    continue
+                    
+                # Parse model key (e.g., 'simple_frequency', 'attention_magnitude')
+                parts = model_key.split('_')
+                if len(parts) >= 2:
+                    model_type = parts[0]  # 'simple' or 'attention'
+                    target = parts[1]      # 'frequency' or 'magnitude'
+                    
+                    # Store the evaluation metrics in the correct structure for comparison
+                    if bin_id not in self.results:
+                        self.results[bin_id] = {}
+                    
+                    self.results[bin_id][model_key] = {
+                        'mse': model_results['mse'],
+                        'mae': model_results['mae'],
+                        'rmse': model_results['rmse'],
+                        'wmape': model_results['wmape'],
+                        'forecast_accuracy': model_results['forecast_accuracy']
+                    }
+                    
+                    merged_count += 1
+        
+        self.logger.info(f"Evaluation results merged successfully. Total metrics merged: {merged_count}")
 
 
 def train_enhanced_quadtree_models(data_path: str,

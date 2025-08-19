@@ -30,8 +30,8 @@ class SimpleLSTM(nn.Module):
     
     def __init__(self, 
                  input_size: int,
-                 hidden_sizes: Tuple[int, int, int, int] = (120, 90, 30, 30),
-                 dropout: float = 0.2,
+                 hidden_sizes: Tuple[int, int, int, int] = (32, 32, 16, 16),
+                 dropout: float = 0.3,
                  bidirectional: bool = False):
         """
         Initialize the Simple LSTM model.
@@ -153,7 +153,9 @@ class SimpleLSTM(nn.Module):
         # Pass through output layer (2 neurons for frequency and magnitude)
         output = self.output_layer(last_output)
         
-        # No sigmoid activation for regression output
+        # Apply sigmoid activation as per the paper
+        # Note: For frequency prediction, sigmoid helps bound the output
+        output = torch.sigmoid(output)
         return output
     
     def get_hidden_states(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:

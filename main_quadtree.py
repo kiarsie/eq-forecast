@@ -221,8 +221,9 @@ def train_quadtree_models(data_path: str,
 
 
 def evaluate_quadtree_models(data_path: str, 
-                            save_dir: str, 
-                            logger: logging.Logger) -> dict:
+                             save_dir: str, 
+                             logger: logging.Logger,
+                             compare_models: bool = True) -> dict:
     """
     Evaluate trained quadtree-based models.
     
@@ -237,19 +238,27 @@ def evaluate_quadtree_models(data_path: str,
     logger.info("Starting model evaluation")
     
     try:
-        # Initialize trainer
-        trainer = QuadtreeModelTrainer(
+        # Use EnhancedQuadtreeTrainer to access trained models
+        trainer = EnhancedQuadtreeTrainer(
             data_path=data_path,
             save_dir=save_dir,
-            lookback_years=10,
-            target_horizon=1,
-            batch_size=32,
-            learning_rate=0.001
+            logger=logger,
+            model_types=['simple', 'attention']
         )
+        
+        # Load the existing trained models into memory first
+        logger.info("Loading existing trained models...")
+        trainer._load_existing_models_from_files()
+        
+        # Now check if models were successfully loaded
+        existing_models = trainer.check_existing_results()
+        if not existing_models:
+            logger.warning("No trained models found. Please train models first.")
+            return {}
         
         # Evaluate models for all bins
         logger.info("Evaluating models for all quadtree bins...")
-        evaluation_results = trainer.evaluate_all_bins()
+        evaluation_results = trainer.evaluate_all_models()
         
         logger.info("Evaluation completed successfully!")
         
@@ -260,31 +269,64 @@ def evaluate_quadtree_models(data_path: str,
         logger.info(f"Successfully evaluated: {successful_bins}")
         logger.info(f"Failed: {len(evaluation_results) - successful_bins}")
         
-        if successful_bins > 0:
-            # Calculate average metrics
-            simple_accuracies = []
-            attention_accuracies = []
-            simple_wmape = []
-            attention_wmape = []
+        if successful_bins > 0 and compare_models:
+            # Calculate average metrics for comparison
+            simple_freq_accuracies = []
+            simple_mag_accuracies = []
+            attention_freq_accuracies = []
+            attention_mag_accuracies = []
+            simple_freq_wmape = []
+            simple_mag_wmape = []
+            attention_freq_wmape = []
+            attention_mag_wmape = []
             
             for bin_results in evaluation_results.values():
                 if 'error' not in bin_results:
-                    if 'simple_lstm' in bin_results:
-                        simple_accuracies.append(bin_results['simple_lstm']['forecast_accuracy'])
-                        simple_wmape.append(bin_results['simple_lstm']['wmape'])
-                    if 'attention_lstm' in bin_results:
-                        attention_accuracies.append(bin_results['attention_lstm']['forecast_accuracy'])
-                        attention_wmape.append(bin_results['attention_lstm']['wmape'])
+                    # Check for frequency models
+                    if 'simple_frequency' in bin_results:
+                        simple_freq_accuracies.append(bin_results['simple_frequency']['forecast_accuracy'])
+                        simple_freq_wmape.append(bin_results['simple_frequency']['wmape'])
+                    if 'attention_frequency' in bin_results:
+                        attention_freq_accuracies.append(bin_results['attention_frequency']['forecast_accuracy'])
+                        attention_freq_wmape.append(bin_results['attention_frequency']['wmape'])
+                    
+                    # Check for magnitude models
+                    if 'simple_magnitude' in bin_results:
+                        simple_mag_accuracies.append(bin_results['simple_magnitude']['forecast_accuracy'])
+                        simple_mag_wmape.append(bin_results['simple_magnitude']['wmape'])
+                    if 'attention_magnitude' in bin_results:
+                        attention_mag_accuracies.append(bin_results['attention_magnitude']['forecast_accuracy'])
+                        attention_mag_wmape.append(bin_results['attention_magnitude']['wmape'])
             
-            if simple_accuracies:
-                logger.info(f"\nSimple LSTM Performance:")
-                logger.info(f"  Average Forecast Accuracy: {np.mean(simple_accuracies):.2f}%")
-                logger.info(f"  Average WMAPE: {np.mean(simple_wmape):.2f}%")
+            # Display frequency performance
+            if simple_freq_accuracies:
+                logger.info(f"\nSimple LSTM Frequency Performance:")
+                logger.info(f"  Average Forecast Accuracy: {np.mean(simple_freq_accuracies):.2f}%")
+                logger.info(f"  Average WMAPE: {np.mean(simple_freq_wmape):.2f}%")
             
-            if attention_accuracies:
-                logger.info(f"\nAttention LSTM Performance:")
-                logger.info(f"  Average Forecast Accuracy: {np.mean(attention_accuracies):.2f}%")
-                logger.info(f"  Average WMAPE: {np.mean(attention_wmape):.2f}%")
+            if attention_freq_accuracies:
+                logger.info(f"\nAttention LSTM Frequency Performance:")
+                logger.info(f"  Average Forecast Accuracy: {np.mean(attention_freq_accuracies):.2f}%")
+                logger.info(f"  Average WMAPE: {np.mean(attention_freq_wmape):.2f}%")
+            
+            # Display magnitude performance
+            if simple_mag_accuracies:
+                logger.info(f"\nSimple LSTM Magnitude Performance:")
+                logger.info(f"  Average Forecast Accuracy: {np.mean(simple_mag_accuracies):.2f}%")
+                logger.info(f"  Average WMAPE: {np.mean(simple_mag_wmape):.2f}%")
+            
+            if attention_mag_accuracies:
+                logger.info(f"\nAttention LSTM Magnitude Performance:")
+                logger.info(f"  Average Forecast Accuracy: {np.mean(attention_mag_accuracies):.2f}%")
+                logger.info(f"  Average WMAPE: {np.mean(attention_mag_wmape):.2f}%")
+            
+            # Generate comparison plots if comparison is enabled
+            if compare_models:
+                logger.info("\nGenerating model comparison plots...")
+                trainer._generate_comparison_plots()
+                logger.info("Comparison plots generated successfully!")
+        else:
+            logger.info("Model comparison disabled or no successful evaluations")
         
         return evaluation_results
         
@@ -404,16 +446,26 @@ def generate_visualizations(save_dir: str, logger: logging.Logger):
             import json
             results = json.load(f)
         
-        # Initialize trainer to generate visualizations
-        trainer = QuadtreeModelTrainer(
-            data_path="",  # Not needed for visualization
+        # Use EnhancedQuadtreeTrainer to generate visualizations
+        # We need the processed data for proper visualization
+        processed_data_path = Path(save_dir).parent / "processed_earthquake_catalog_annual_stats.csv"
+        if not processed_data_path.exists():
+            logger.warning("Processed data not found, skipping visualizations")
+            logger.warning("Please run preprocessing first to generate visualizations")
+            return
+        
+        trainer = EnhancedQuadtreeTrainer(
+            data_path=str(processed_data_path),
             save_dir=save_dir,
-            lookback_years=10,
-            target_horizon=1
+            logger=logger,
+            model_types=['simple', 'attention']
         )
         
-        # Generate visualizations
-        trainer.generate_visualizations(results)
+        # Load existing models for visualization
+        trainer._load_existing_models_from_files()
+        
+        # Generate visualizations using the enhanced trainer
+        trainer._generate_comparison_plots()
         
         logger.info("Visualizations generated successfully!")
         
@@ -424,20 +476,72 @@ def generate_visualizations(save_dir: str, logger: logging.Logger):
 def main():
     """Main function."""
     
-    def get_data_path(mode, output_dir, input_data):
+    def get_data_path(mode, output_dir, input_data, logger=None):
         """Helper function to get the appropriate data path based on mode and available data."""
+        if logger:
+            logger.info(f"get_data_path called with: mode={mode}, output_dir={output_dir}, input_data={input_data}")
+        
         if mode == 'full_pipeline':
             # For full pipeline, we expect the processed data to exist
             processed_data_path = output_dir / "processed_earthquake_catalog.csv"
             annual_stats_path = output_dir / "processed_earthquake_catalog_annual_stats.csv"
             if annual_stats_path.exists():
+                if logger:
+                    logger.info(f"Full pipeline: Using annual stats: {annual_stats_path}")
                 return str(annual_stats_path)
             elif processed_data_path.exists():
+                if logger:
+                    logger.info(f"Full pipeline: Using processed data: {processed_data_path}")
                 return str(processed_data_path)
             else:
+                if logger:
+                    logger.warning(f"Full pipeline: No processed data found, using input: {input_data}")
                 return input_data
+        elif mode in ['evaluate', 'test', 'validate']:
+            # For evaluation, testing, and validation, we MUST use processed data
+            # We need the annual stats data because that's what the QuadtreeDataLoader is designed for
+            # The QuadtreeDataLoader expects aggregated annual data, not individual earthquake records
+            processed_catalog_path = output_dir / "processed_earthquake_catalog.csv"
+            annual_stats_path = output_dir / "processed_earthquake_catalog_annual_stats.csv"
+            
+            if logger:
+                logger.info(f"Evaluate/Test/Validate mode: Checking for processed data")
+                logger.info(f"Processed catalog exists: {processed_catalog_path.exists()}")
+                logger.info(f"Annual stats exists: {annual_stats_path.exists()}")
+            
+            # For evaluation, we need the annual stats data because:
+            # 1. The QuadtreeDataLoader is designed to work with annual aggregated data
+            # 2. The QuadtreeDataLoader expects columns: bin_id, year, frequency, max_magnitude  
+            # 3. The processed catalog has columns: bin_id, year, magnitude, depth (individual records)
+            # 4. The models were trained using annual stats data, not individual records
+            if annual_stats_path.exists():
+                # Verify it has the required columns
+                try:
+                    import pandas as pd
+                    df = pd.read_csv(annual_stats_path)
+                    required_columns = ['bin_id', 'year', 'frequency', 'max_magnitude']
+                    missing_columns = [col for col in required_columns if col not in df.columns]
+                    if missing_columns:
+                        if logger:
+                            logger.warning(f"Annual stats missing required columns: {missing_columns}")
+                            logger.error(f"Cannot proceed with {mode} mode - missing required columns")
+                        raise ValueError(f"Missing required columns: {missing_columns}")
+                    if logger:
+                        logger.info(f"Evaluate/Test/Validate mode: Using annual stats: {annual_stats_path}")
+                    return str(annual_stats_path)
+                except Exception as e:
+                    if logger:
+                        logger.warning(f"Error reading annual stats: {e}")
+                        logger.error(f"Cannot proceed with {mode} mode - error reading annual stats")
+                    raise
+            else:
+                if logger:
+                    logger.error(f"Cannot proceed with {mode} mode - annual stats not found")
+                    logger.error(f"Expected: {annual_stats_path}")
+                    logger.error("Please run preprocessing first: python main_quadtree.py --mode preprocess")
+                raise FileNotFoundError(f"Annual stats not found: {annual_stats_path}")
         else:
-            # Check if preprocessed data exists
+            # For other modes (preprocess, train), check if preprocessed data exists
             annual_stats_path = output_dir / "processed_earthquake_catalog_annual_stats.csv"
             if annual_stats_path.exists():
                 # Verify it has the required columns
@@ -447,11 +551,13 @@ def main():
                     required_columns = ['bin_id', 'year', 'frequency', 'max_magnitude']
                     missing_columns = [col for col in required_columns if col not in df.columns]
                     if missing_columns:
-                        logger.warning(f"Preprocessed data missing required columns: {missing_columns}")
+                        if logger:
+                            logger.warning(f"Annual stats missing required columns: {missing_columns}")
                         return input_data
                     return str(annual_stats_path)
                 except Exception as e:
-                    logger.warning(f"Error reading preprocessed data: {e}")
+                    if logger:
+                        logger.warning(f"Error reading annual stats: {e}")
                     return input_data
             else:
                 return input_data
@@ -648,7 +754,7 @@ def main():
             logger.info("="*50)
             
             # Get appropriate data path
-            data_path = get_data_path(args.mode, output_dir, args.input_data)
+            data_path = get_data_path(args.mode, output_dir, args.input_data, logger)
             if data_path != args.input_data:
                 logger.info(f"Using preprocessed data: {data_path}")
                 # Verify the file exists
@@ -701,7 +807,7 @@ def main():
             logger.info("="*50)
             
             # Get appropriate data path
-            data_path = get_data_path(args.mode, output_dir, args.input_data)
+            data_path = get_data_path(args.mode, output_dir, args.input_data, logger)
             
             results_dir = output_dir / "results"
             test_results = test_quadtree_models(
@@ -719,7 +825,7 @@ def main():
             logger.info("="*50)
             
             # Get appropriate data path
-            data_path = get_data_path(args.mode, output_dir, args.input_data)
+            data_path = get_data_path(args.mode, output_dir, args.input_data, logger)
             
             results_dir = output_dir / "results"
             validation_results = validate_quadtree_models(
@@ -735,15 +841,29 @@ def main():
             logger.info("\n" + "="*50)
             logger.info("STEP 3: MODEL EVALUATION")
             logger.info("="*50)
+            logger.info("*** EVALUATION SECTION REACHED ***")
             
             # Get appropriate data path
-            data_path = get_data_path(args.mode, output_dir, args.input_data)
+            logger.info(f"Calling get_data_path for mode: {args.mode}")
+            data_path = get_data_path(args.mode, output_dir, args.input_data, logger)
+            logger.info(f"get_data_path returned: {data_path}")
             
             results_dir = output_dir / "results"
+            
+            # For evaluation mode, always enable model comparison
+            if args.mode == 'evaluate':
+                logger.info("Evaluation mode: Enabling model comparison and comprehensive analysis")
+                compare_models = True
+                logger.info(f"Compare models set to: {compare_models}")
+            else:
+                compare_models = args.compare_models
+                logger.info(f"Full pipeline mode: Using compare_models flag: {compare_models}")
+            
             evaluation_results = evaluate_quadtree_models(
                 data_path=data_path,
                 save_dir=str(results_dir),
-                logger=logger
+                logger=logger,
+                compare_models=compare_models
             )
             
             logger.info(f"Evaluation results saved to: {results_dir}")

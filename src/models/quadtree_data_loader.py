@@ -332,11 +332,24 @@ class QuadtreeDataLoader:
         Returns:
             Dictionary mapping bin_id to (train_loader, val_loader, test_loader)
         """
+        # Use cached loaders if already created
+        if hasattr(self, '_cached_bin_loaders') and self._cached_bin_loaders:
+            self.logger.info("Using cached bin loaders")
+            return self._cached_bin_loaders
+        
         bin_loaders = {}
         
         # Get unique bin IDs
         unique_bins = self.dataset.data['bin_id'].unique()
         self.logger.info(f"Found {len(unique_bins)} unique bins: {sorted(unique_bins)}")
+        
+        # Pre-filter sequences by bin_id for efficiency
+        sequences_by_bin = {}
+        for seq in self.dataset.sequences:
+            bin_id = seq['bin_id']
+            if bin_id not in sequences_by_bin:
+                sequences_by_bin[bin_id] = []
+            sequences_by_bin[bin_id].append(seq)
         
         for bin_id in unique_bins:
             # Filter dataset for this bin
@@ -354,7 +367,7 @@ class QuadtreeDataLoader:
                 self.logger.warning(f"Bin {bin_id} has insufficient year span ({year_span} years), skipping")
                 continue
             
-            # Create bin-specific dataset
+            # Create bin-specific dataset efficiently
             bin_dataset = QuadtreeEarthquakeDataset(
                 data_path=self.data_path,
                 lookback_years=self.lookback_years,
@@ -362,9 +375,11 @@ class QuadtreeDataLoader:
                 normalize=self.normalize
             )
             
-            # Filter sequences for this bin
-            bin_sequences = [seq for seq in bin_dataset.sequences if seq['bin_id'] == bin_id]
-            bin_dataset.sequences = bin_sequences
+            # Use pre-filtered sequences instead of filtering again
+            if bin_id in sequences_by_bin:
+                bin_dataset.sequences = sequences_by_bin[bin_id]
+            else:
+                bin_dataset.sequences = []
             
             # Create data loaders for this bin
             bin_train_loader, bin_val_loader, bin_test_loader = self._create_bin_loaders(bin_dataset)
@@ -374,6 +389,10 @@ class QuadtreeDataLoader:
         
         self.logger.info(f"Created separate loaders for {len(bin_loaders)} quadtree bins")
         self.logger.info(f"Available bins for training: {sorted(bin_loaders.keys())}")
+        
+        # Cache the results to avoid recreating them
+        self._cached_bin_loaders = bin_loaders
+        
         return bin_loaders
     
     def _create_bin_loaders(self, bin_dataset: QuadtreeEarthquakeDataset) -> Tuple[DataLoader, DataLoader, DataLoader]:
@@ -431,3 +450,7 @@ class QuadtreeDataLoader:
     def get_bin_count(self) -> int:
         """Get the number of unique quadtree bins."""
         return self.dataset.data['bin_id'].nunique()
+    
+    def get_bin_ids(self) -> List[int]:
+        """Get the list of unique quadtree bin IDs."""
+        return sorted(self.dataset.data['bin_id'].unique())

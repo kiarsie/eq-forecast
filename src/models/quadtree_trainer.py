@@ -127,16 +127,16 @@ class QuadtreeModelTrainer:
             # Simple LSTM
             simple_lstm = SimpleLSTM(
                 input_size=self.input_size,
-                hidden_sizes=(120, 90, 30, 30),  # As per paper
-                dropout=0.2,
+                hidden_sizes=(64, 48, 24, 24),  # Balanced capacity - not too small, not too large
+                dropout=0.2,  # Reduced dropout for better capacity utilization
                 bidirectional=False
             ).to(self.device)
             
             # Attention LSTM
             attention_lstm = AttentionLSTM(
                 input_size=self.input_size,
-                hidden_sizes=(120, 90, 30, 30),  # As per paper
-                dropout=0.2,
+                hidden_sizes=(64, 48, 24, 24),  # Balanced capacity - not too small, not too large
+                dropout=0.2,  # Reduced dropout for better capacity utilization
                 bidirectional=False
             ).to(self.device)
             
@@ -148,8 +148,8 @@ class QuadtreeModelTrainer:
             
             # Create optimizers
             self.optimizers[bin_id] = {
-                'simple_lstm': optim.Adam(simple_lstm.parameters(), lr=self.learning_rate),
-                'attention_lstm': optim.Adam(attention_lstm.parameters(), lr=self.learning_rate)
+                'simple_lstm': optim.Adam(simple_lstm.parameters(), lr=self.learning_rate, weight_decay=1e-4),
+                'attention_lstm': optim.Adam(attention_lstm.parameters(), lr=self.learning_rate, weight_decay=1e-4)
             }
         
         self.logger.info(f"Initialized {self.bin_count * 2} models (2 per bin)")
