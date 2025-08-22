@@ -3,7 +3,7 @@
 Enhanced Data Processor for Shared LSTM Earthquake Forecasting
 
 Handles:
-- Annual aggregation of earthquake data (1910 → March 2025)
+- Annual aggregation of earthquake data (1910 -> March 2025)
 - Rolling features (3, 5, 10 years) computed causally
 - Time-based data splitting (train ≤2009, val 2010–2017, test 2018–2025)
 - Feature engineering for shared LSTM model

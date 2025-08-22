@@ -4,7 +4,7 @@ Shared LSTM Model for Earthquake Forecasting
 
 Implements a single shared LSTM model across all quadtree bins with:
 - Dual output heads: max magnitude (continuous) and frequency (log-frequency)
-- LSTM(64, return_sequences=True) → LSTM(32, return_sequences=False)
+- LSTM(64, return_sequences=True) -> LSTM(32, return_sequences=False)
 - Concatenation with bin metadata features
 - Weighted loss combining MSE (magnitude) and MSE (log-frequency)
 """
@@ -81,7 +81,7 @@ class SharedLSTMModel(nn.Module):
             nn.Linear(30, 1)  # No activation for magnitude
         )
         
-        # [REFACTOR] Frequency head: enhanced architecture with light hidden layer
+        # [REFACTOR] Frequency head: enhanced architecture with learnable scaling
         if freq_head_type == "linear":
             # Enhanced frequency head: light hidden layer for better expressiveness
             self.frequency_head = nn.Sequential(
@@ -94,13 +94,13 @@ class SharedLSTMModel(nn.Module):
                 nn.Linear(90, 30),
                 nn.ReLU(),
                 nn.Dropout(dropout_rate * 0.2),
-                nn.Linear(30, 8),  # 🔧 NEW: Light hidden layer
+                nn.Linear(30, 8),  # NEW: Light hidden layer
                 nn.ReLU(),
-                nn.Linear(8, 1)    # 🔧 NEW: Output layer
+                nn.Linear(8, 1)    # NEW: Output layer
             )
-            # No learnable scaling parameters for linear mode
-            self.frequency_scale = None
-            self.frequency_bias = None
+            # FIX: Add learnable scaling parameters for linear mode to prevent prediction collapse
+            self.frequency_scale = nn.Parameter(torch.tensor(1.0))
+            self.frequency_bias = nn.Parameter(torch.tensor(0.0))
         else:
             # Legacy scaled mode (kept for comparison)
             self.frequency_head = nn.Sequential(
@@ -123,16 +123,18 @@ class SharedLSTMModel(nn.Module):
             self.frequency_scale = nn.Parameter(torch.tensor(1.0))
             self.frequency_bias = nn.Parameter(torch.tensor(0.0))
         
+        # FIX: Create logger before calling _init_weights to avoid AttributeError
+        self.logger = logging.getLogger(__name__)
+        
         # Initialize weights
         self._init_weights()
         
-        self.logger = logging.getLogger(__name__)
         self.logger.info(f"SharedLSTMModel initialized with {sum(p.numel() for p in self.parameters())} parameters")
         self.logger.info(f"[REFACTORING] Frequency head type: {freq_head_type}")
         if freq_head_type == "linear":
             self.logger.info("  - Linear frequency head: direct log-frequency prediction")
-            self.logger.info("  - No learnable scaling parameters")
-            self.logger.info("  - Stable regression in log-space")
+            self.logger.info("  - FIX: Added learnable scaling parameters to prevent collapse")
+            self.logger.info("  - Stable regression in log-space with adaptive scaling")
         else:
             self.logger.info("  - Scaled frequency head: learnable scaling parameters")
             self.logger.info("  - Legacy mode for comparison")
@@ -152,6 +154,19 @@ class SharedLSTMModel(nn.Module):
                         nn.init.xavier_uniform_(param)
                     elif 'bias' in name:
                         nn.init.zeros_(param)
+        
+        # FIX: Initialize frequency scaling parameters for better training stability
+        if hasattr(self, 'frequency_scale') and self.frequency_scale is not None:
+            # IMPROVED: Initialize scale to a larger value to encourage wider prediction ranges
+            # Start with scale=5.0 instead of 2.0 to help model learn much broader frequency distributions
+            nn.init.constant_(self.frequency_scale, 5.0)
+            self.logger.info("  - Frequency scale initialized to 5.0 (aggressive initialization)")
+        
+        if hasattr(self, 'frequency_bias') and self.frequency_bias is not None:
+            # IMPROVED: Initialize bias to a larger positive value to shift predictions up
+            # Start with bias=1.0 instead of 0.5 to help model learn higher frequency values
+            nn.init.constant_(self.frequency_bias, 1.0)
+            self.logger.info("  - Frequency bias initialized to 1.0 (aggressive initialization)")
     
     def forward(self, 
                 input_sequence: torch.Tensor, 
@@ -193,7 +208,11 @@ class SharedLSTMModel(nn.Module):
             # Legacy scaled mode
             frequency_pred = self.frequency_scale * frequency_pred + self.frequency_bias
             frequency_pred = F.softplus(frequency_pred) + 1e-6  # Softplus for positivity
-        # For linear mode, return raw output directly (log-frequency)
+        # FIX: Apply scaling to linear mode as well to prevent prediction collapse
+        elif self.freq_head_type == "linear" and self.frequency_scale is not None:
+            # Linear mode: apply scaling to match target ranges
+            frequency_pred = self.frequency_scale * frequency_pred + self.frequency_bias
+        # For both modes, return scaled output
         
         return magnitude_pred, frequency_pred
     
@@ -202,17 +221,24 @@ class SharedLSTMModel(nn.Module):
         Convert frequency predictions to expected count predictions.
         
         Args:
-            frequency_pred: frequency predictions (log-frequency for linear mode, log1p for scaled mode)
+            frequency_pred: frequency predictions (scaled log-frequency for both modes)
             
         Returns:
             Expected count predictions converted to raw counts
         """
+        # FIX: frequency_pred is already scaled by the model's learnable parameters
+        # Both modes now output scaled values that need to be converted to raw counts
+        
         if self.freq_head_type == "linear":
-            # frequency_pred is log(λ), so λ = exp(frequency_pred)
-            raw_counts = torch.exp(frequency_pred)
+            # Linear mode: frequency_pred is scaled log(λ), convert to raw counts
+            # First denormalize the scaling, then convert to raw counts
+            denorm_pred = (frequency_pred - self.frequency_bias) / self.frequency_scale
+            raw_counts = torch.exp(denorm_pred)
         else:
-            # Legacy mode: frequency_pred is log(1 + λ), so λ = expm1(frequency_pred)
-            raw_counts = torch.expm1(frequency_pred)
+            # Scaled mode: frequency_pred has scaling + Softplus, convert to raw counts
+            # First denormalize the scaling, then convert to raw counts
+            denorm_pred = (frequency_pred - self.frequency_bias) / self.frequency_scale
+            raw_counts = torch.expm1(denorm_pred)
         
         # Add small epsilon to prevent zero values
         return raw_counts + 1e-6
@@ -222,7 +248,7 @@ class WeightedEarthquakeLoss(nn.Module):
     """
     Custom loss function combining MSE for magnitude and MSE for frequency.
     
-    🔧 REFACTOR: Updated to use rebalanced weights and direct log-frequency comparison.
+    REFACTOR: Updated to use rebalanced weights and direct log-frequency comparison.
     Total Loss = alpha*MSE + beta*MSE (frequency targets preprocessed with log1p)
     """
     
@@ -256,23 +282,26 @@ class WeightedEarthquakeLoss(nn.Module):
         
         Args:
             magnitude_pred: magnitude predictions
-            frequency_pred: frequency predictions (log-frequency for linear mode)
+            frequency_pred: frequency predictions (scaled log-frequency for both modes)
             magnitude_true: true magnitude values
             frequency_true: true frequency counts
         """
         # Magnitude loss (MSE)
         magnitude_loss = F.mse_loss(magnitude_pred, magnitude_true)
         
-        # 🔧 REFACTOR: Preprocess frequency targets with log1p and train directly on that scale
+        # FIX: Ensure frequency predictions are properly scaled before loss computation
+        # frequency_pred is already scaled by the model's learnable parameters
+        
+        # REFACTOR: Preprocess frequency targets with log1p and train directly on that scale
         frequency_true_log1p = torch.log1p(frequency_true)  # log(1 + frequency)
         
-        # 🔧 FIX: frequency_pred is already in log-space, compare directly
-        # No need to convert frequency_pred back to log1p space
+        # FIX: frequency_pred is now scaled, compare directly with log1p targets
+        # The model learns to output values in the same scale as log1p targets
         
         # Frequency loss: MSE on log1p scale
         frequency_loss = F.mse_loss(frequency_pred, frequency_true_log1p)
         
-        # 🔧 REFACTOR: Weighted combination with rebalanced weights
+        # REFACTOR: Weighted combination with rebalanced weights
         total_loss = (self.magnitude_weight * magnitude_loss + 
                      self.frequency_weight * frequency_loss)
         

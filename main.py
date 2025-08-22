@@ -11,7 +11,7 @@ Implements the methodology from the paper with shared LSTM architecture:
 6. Model Comparison: Simple LSTM vs Attention LSTM with consistent hyperparameters
 
 Architecture:
-- Shared LSTM: LSTM(64, return_sequences=True) → LSTM(32, return_sequences=False)
+- Shared LSTM: LSTM(64, return_sequences=True) -> LSTM(32, return_sequences=False)
 - Dual output heads: magnitude (continuous) and frequency (Poisson log-rate)
 - Metadata integration: spatial coordinates, bin area, temporal features
 - Weighted loss combining MSE (magnitude) and log1p+MSE (frequency)
@@ -42,6 +42,8 @@ sys.path.append(str(Path(__file__).parent / "src"))
 from src.preprocessing.earthquake_processor import EarthquakeProcessor
 from src.models.shared_lstm_model import SharedLSTMModel, WeightedEarthquakeLoss
 from src.models.shared_lstm_trainer import SharedLSTMTrainer
+from src.models.attention_shared_lstm_model import AttentionSharedLSTMModel
+from src.models.attention_shared_lstm_trainer import AttentionSharedLSTMTrainer
 from src.models.enhanced_shared_processor import EnhancedSharedDataset
 from src.models.model_comparison_trainer import ModelComparisonTrainer
 
@@ -288,6 +290,46 @@ def create_shared_lstm_model(input_features: int,
     return model
 
 
+def create_attention_shared_lstm_model(input_features: int, 
+                                       metadata_features: int,
+                                       lookback_years: int = 10,
+                                       logger: logging.Logger = None) -> AttentionSharedLSTMModel:
+    """
+    Create the attention shared LSTM model.
+    
+    Args:
+        input_features: Number of input features
+        metadata_features: Number of metadata features
+        lookback_years: Number of years to look back
+        logger: Logger instance
+        
+    Returns:
+        AttentionSharedLSTMModel instance
+    """
+    if logger:
+        logger.info("Creating attention shared LSTM model...")
+        logger.info(f"Input features: {input_features}")
+        logger.info(f"Metadata features: {metadata_features}")
+        logger.info(f"Lookback years: {lookback_years}")
+    
+    model = AttentionSharedLSTMModel(
+        input_seq_features=input_features,
+        metadata_features=metadata_features,
+        lookback_years=lookback_years,
+        lstm_hidden_1=64,
+        lstm_hidden_2=32,
+        dense_hidden=32,
+        dropout_rate=0.25,
+        freq_head_type="linear"  # Default to new stable linear frequency head
+    )
+    
+    if logger:
+        total_params = sum(p.numel() for p in model.parameters())
+        logger.info(f"Model created with {total_params:,} parameters")
+    
+    return model
+
+
 def train_shared_lstm_model(model: SharedLSTMModel,
                             train_loader: torch.utils.data.DataLoader,
                             val_loader: torch.utils.data.DataLoader,
@@ -337,7 +379,8 @@ def train_shared_lstm_model(model: SharedLSTMModel,
             weight_decay=weight_decay,
             magnitude_weight=magnitude_weight,
             frequency_weight=frequency_weight,
-            correlation_weight=correlation_weight
+            correlation_weight=correlation_weight,
+            save_dir=save_dir
         )
         
         # Create save directory
@@ -398,10 +441,121 @@ def train_shared_lstm_model(model: SharedLSTMModel,
         raise
 
 
+def train_attention_shared_lstm_model(model: AttentionSharedLSTMModel,
+                                      train_loader: torch.utils.data.DataLoader,
+                                      val_loader: torch.utils.data.DataLoader,
+                                      test_loader: torch.utils.data.DataLoader,
+                                      save_dir: str,
+                                      logger: logging.Logger,
+                                      num_epochs: int = 300,
+                                      learning_rate: float = 1e-3,
+                                      weight_decay: float = 1e-4,
+                                      magnitude_weight: float = 1.0,
+                                      frequency_weight: float = 4.0,
+                                      correlation_weight: float = 0.0) -> Dict:
+    """
+    Train the attention shared LSTM model.
+    
+    Args:
+        model: AttentionSharedLSTMModel instance
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        test_loader: Test data loader
+        save_dir: Directory to save results
+        logger: Logger instance
+        num_epochs: Maximum training epochs
+        learning_rate: Learning rate
+        weight_decay: Weight decay
+        magnitude_weight: Weight for magnitude loss
+        frequency_weight: Weight for frequency loss
+        correlation_weight: Weight for correlation penalty
+        
+    Returns:
+        Training results dictionary
+    """
+    logger.info("Starting attention shared LSTM model training")
+    logger.info(f"Save directory: {save_dir}")
+    logger.info(f"Training epochs: {num_epochs}")
+    logger.info(f"Learning rate: {learning_rate}")
+    logger.info(f"Loss weights: alpha(magnitude)={magnitude_weight}, beta(frequency)={frequency_weight}, gamma(correlation)={correlation_weight}")
+    
+    try:
+        # Create trainer
+        trainer = AttentionSharedLSTMTrainer(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            magnitude_weight=magnitude_weight,
+            frequency_weight=frequency_weight,
+            correlation_weight=correlation_weight
+        )
+        
+        # Create save directory
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        
+        # Train the model
+        logger.info("Training model...")
+        training_history = trainer.train(
+            max_epochs=num_epochs,
+            save_path=str(save_path / "attention_best_model.pth"),
+            save_best=True
+        )
+        
+        # Evaluate on test set
+        logger.info("Evaluating on test set...")
+        test_metrics = trainer.evaluate(test_loader)
+        
+        # Save training history
+        history_path = save_path / "attention_training_history.json"
+        with open(history_path, 'w') as f:
+            json.dump(training_history, f, indent=2)
+        
+        # Save test metrics
+        metrics_path = save_path / "attention_test_metrics.json"
+        with open(metrics_path, 'w') as f:
+            # 🔧 FIX: Convert numpy types to Python types for JSON serialization
+            serializable_metrics = {}
+            for key, value in test_metrics.items():
+                if hasattr(value, 'item'):  # numpy scalar
+                    serializable_metrics[key] = value.item()
+                elif isinstance(value, (list, tuple)):
+                    serializable_metrics[key] = [float(v.item()) if hasattr(v, 'item') else v for v in value]
+                else:
+                    serializable_metrics[key] = value
+            
+            json.dump(serializable_metrics, f, indent=2)
+        
+        # Plot training history
+        plot_path = save_path / "attention_training_history.png"
+        trainer.plot_training_history(str(plot_path))
+        
+        logger.info("Training completed successfully!")
+        logger.info(f"Best validation loss: {trainer.best_val_loss:.4f}")
+        logger.info(f"Test metrics saved to: {metrics_path}")
+        logger.info(f"Training history saved to: {history_path}")
+        logger.info(f"Training plots saved to: {plot_path}")
+        
+        return {
+            'training_history': training_history,
+            'test_metrics': test_metrics,
+            'best_val_loss': trainer.best_val_loss,
+            'model_path': str(save_path / "attention_best_model.pth")
+        }
+        
+    except Exception as e:
+        logger.error(f"Error during training: {e}")
+        raise
+
+
 def evaluate_shared_lstm_model(model_path: str,
                                test_loader: torch.utils.data.DataLoader,
                                save_dir: str,
-                               logger: logging.Logger) -> Dict:
+                               logger: logging.Logger,
+                               model_type: str = "simple") -> Dict:
     """
     Evaluate the trained shared LSTM model.
     
@@ -454,24 +608,49 @@ def evaluate_shared_lstm_model(model_path: str,
         logger.info(f"  lstm_hidden_1: {lstm1_hidden_size}")
         logger.info(f"  lstm_hidden_2: {lstm2_hidden_size}")
         
-        dummy_model = SharedLSTMModel(
-            input_seq_features=input_features,
-            metadata_features=metadata_features,
-            lookback_years=10,
-            lstm_hidden_1=lstm1_hidden_size,
-            lstm_hidden_2=lstm2_hidden_size,
-            dense_hidden=32,
-            dropout_rate=0.25,
-            freq_head_type="linear"  # Default to new stable linear frequency head
-        )
+        if model_type == "attention":
+            # Create attention model for attention checkpoints
+            from src.models.attention_shared_lstm_model import AttentionSharedLSTMModel
+            dummy_model = AttentionSharedLSTMModel(
+                input_seq_features=input_features,
+                metadata_features=metadata_features,
+                lookback_years=10,
+                lstm_hidden_1=lstm1_hidden_size,
+                lstm_hidden_2=lstm2_hidden_size,
+                dense_hidden=32,
+                dropout_rate=0.25,
+                freq_head_type="linear"  # Default to new stable linear frequency head
+            )
+        else:
+            # Create simple model for simple checkpoints
+            dummy_model = SharedLSTMModel(
+                input_seq_features=input_features,
+                metadata_features=metadata_features,
+                lookback_years=10,
+                lstm_hidden_1=lstm1_hidden_size,
+                lstm_hidden_2=lstm2_hidden_size,
+                dense_hidden=32,
+                dropout_rate=0.25,
+                freq_head_type="linear"  # Default to new stable linear frequency head
+            )
         
         # Create trainer with loaded model
-        trainer = SharedLSTMTrainer(
-            model=dummy_model,
-            train_loader=test_loader,  # Dummy
-            val_loader=test_loader,    # Dummy
-            test_loader=test_loader
-        )
+        if model_type == "attention":
+            from src.models.attention_shared_lstm_trainer import AttentionSharedLSTMTrainer
+            trainer = AttentionSharedLSTMTrainer(
+                model=dummy_model,
+                train_loader=test_loader,  # Dummy
+                val_loader=test_loader,    # Dummy
+                test_loader=test_loader
+            )
+        else:
+            trainer = SharedLSTMTrainer(
+                model=dummy_model,
+                train_loader=test_loader,  # Dummy
+                val_loader=test_loader,    # Dummy
+                test_loader=test_loader,
+                save_dir=save_dir
+            )
         
         # Load the trained model
         trainer.load_model(model_path)
@@ -520,7 +699,8 @@ def evaluate_shared_lstm_model(model_path: str,
 def generate_comprehensive_visualizations(save_dir: str, 
                                          model_path: str,
                                          test_loader: torch.utils.data.DataLoader,
-                                         logger: logging.Logger):
+                                         logger: logging.Logger,
+                                         model_type: str = "simple"):
     """
     Generate comprehensive visualizations of results.
     
@@ -560,24 +740,49 @@ def generate_comprehensive_visualizations(save_dir: str,
         logger.info(f"  lstm_hidden_1: {lstm1_hidden_size}")
         logger.info(f"  lstm_hidden_2: {lstm2_hidden_size}")
         
-        dummy_model = SharedLSTMModel(
-            input_seq_features=input_features,
-            metadata_features=metadata_features,
-            lookback_years=10,
-            lstm_hidden_1=lstm1_hidden_size,
-            lstm_hidden_2=lstm2_hidden_size,
-            dense_hidden=32,
-            dropout_rate=0.25,
-            freq_head_type="linear"  # Default to new stable linear frequency head
-        )
+        if model_type == "attention":
+            # Create attention model for attention checkpoints
+            from src.models.attention_shared_lstm_model import AttentionSharedLSTMModel
+            dummy_model = AttentionSharedLSTMModel(
+                input_seq_features=input_features,
+                metadata_features=metadata_features,
+                lookback_years=10,
+                lstm_hidden_1=lstm1_hidden_size,
+                lstm_hidden_2=lstm2_hidden_size,
+                dense_hidden=32,
+                dropout_rate=0.25,
+                freq_head_type="linear"  # Default to new stable linear frequency head
+            )
+        else:
+            # Create simple model for simple checkpoints
+            dummy_model = SharedLSTMModel(
+                input_seq_features=input_features,
+                metadata_features=metadata_features,
+                lookback_years=10,
+                lstm_hidden_1=lstm1_hidden_size,
+                lstm_hidden_2=lstm2_hidden_size,
+                dense_hidden=32,
+                dropout_rate=0.25,
+                freq_head_type="linear"  # Default to new stable linear frequency head
+            )
         
         # Create trainer with loaded model
-        trainer = SharedLSTMTrainer(
-            model=dummy_model,
-            train_loader=test_loader,  # Dummy
-            val_loader=test_loader,    # Dummy
-            test_loader=test_loader
-        )
+        if model_type == "attention":
+            from src.models.attention_shared_lstm_trainer import AttentionSharedLSTMTrainer
+            trainer = AttentionSharedLSTMTrainer(
+                model=dummy_model,
+                train_loader=test_loader,  # Dummy
+                val_loader=test_loader,    # Dummy
+                test_loader=test_loader
+            )
+        else:
+            trainer = SharedLSTMTrainer(
+                model=dummy_model,
+                train_loader=test_loader,  # Dummy
+                val_loader=test_loader,    # Dummy
+                test_loader=test_loader,
+                save_dir=save_dir
+            )
         
         # Load the trained model
         trainer.load_model(model_path)
@@ -607,8 +812,8 @@ def generate_comprehensive_visualizations(save_dir: str,
                     'frequency': frequency_count_pred.cpu().numpy()
                 })
                 all_targets.append({
-                    'magnitude': target_seq[:, 0, 0].numpy(),
-                    'frequency': target_seq[:, 0, 1].numpy()
+                    'magnitude': target_seq[:, 0].numpy(),  # Fixed: target_seq is [batch_size, 2]
+                    'frequency': target_seq[:, 1].numpy()   # Fixed: target_seq is [batch_size, 2]
                 })
                 all_metadata.append(metadata_dict)
         
@@ -819,14 +1024,30 @@ def create_spatial_analysis_plots(save_path: Path,
                 frequency_count_pred = trainer.model.predict_frequency_counts(frequency_log_rate_pred.squeeze())
                 
                 # Extract bin information
-                for i, meta in enumerate(metadata_dict):
-                    bin_id = meta['bin_id']
-                    center_lat = metadata[i, 0].cpu().numpy()
-                    center_lon = metadata[i, 1].cpu().numpy()
+                # metadata_dict contains batch data, bin_id is a list
+                bin_ids = metadata_dict['bin_id']
+                logger.info(f"DEBUG: Processing bin_id: {bin_ids} (type: {type(bin_ids)})")
+                
+                # Process each sample in the batch
+                for i in range(len(target_seq)):
+                    # Get the bin_id for this specific sample
+                    bin_id = bin_ids[i] if isinstance(bin_ids, (list, np.ndarray)) else str(bin_ids)
                     
+                    # For pre-processed data, we don't have actual lat/lon coordinates
+                    # Use bin_id as spatial identifier and create synthetic coordinates for visualization
+                    try:
+                        bin_id_numeric = float(bin_id) if bin_id != '-1' else 0.0
+                    except (ValueError, TypeError):
+                        # Handle cases where bin_id might be a string or other format
+                        bin_id_numeric = 0.0
+                    
+                    # Create synthetic coordinates based on bin_id for visualization purposes
+                    center_lat = bin_id_numeric * 10  # Synthetic latitude
+                    center_lon = bin_id_numeric * 15  # Synthetic longitude
+                
                     # Calculate metrics
-                    mag_true = target_seq[i, 0, 0].item()
-                    freq_true = target_seq[i, 0, 1].item()
+                    mag_true = target_seq[i, 0].item()  # Fixed: target_seq is [batch_size, 2]
+                    freq_true = target_seq[i, 1].item()  # Fixed: target_seq is [batch_size, 2]
                     mag_pred = magnitude_pred[i].item()
                     freq_pred = frequency_count_pred[i].item()
                     
@@ -835,6 +1056,7 @@ def create_spatial_analysis_plots(save_path: Path,
                     freq_true_denorm = test_loader.dataset.denormalize_single_feature(freq_true, 'frequency')
                     
                     if bin_id not in bin_performance:
+                        logger.info(f"DEBUG: Creating new bin_performance entry for bin_id: {bin_id}")
                         bin_performance[bin_id] = {
                             'lat': center_lat,
                             'lon': center_lon,
@@ -846,6 +1068,7 @@ def create_spatial_analysis_plots(save_path: Path,
                             'frequency_predictions': []
                         }
                     
+                    logger.info(f"DEBUG: Appending data for bin_id: {bin_id}")
                     bin_performance[bin_id]['magnitude_errors'].append(abs(mag_pred - mag_true_denorm))
                     bin_performance[bin_id]['frequency_errors'].append(abs(freq_pred - freq_true_denorm))
                     bin_performance[bin_id]['magnitude_targets'].append(mag_true_denorm)
@@ -864,17 +1087,17 @@ def create_spatial_analysis_plots(save_path: Path,
         
         # 1. Magnitude MAE spatial plot
         scatter1 = axes[0, 0].scatter(lons, lats, c=mag_mae, cmap='viridis', s=100, alpha=0.8)
-        axes[0, 0].set_xlabel('Longitude')
-        axes[0, 0].set_ylabel('Latitude')
-        axes[0, 0].set_title('Magnitude MAE by Spatial Bin')
+        axes[0, 0].set_xlabel('Synthetic Longitude (Bin ID × 15)')
+        axes[0, 0].set_ylabel('Synthetic Latitude (Bin ID × 10)')
+        axes[0, 0].set_title('Magnitude MAE by Spatial Bin (Synthetic Coordinates)')
         plt.colorbar(scatter1, ax=axes[0, 0], label='MAE')
         axes[0, 0].grid(True, alpha=0.3)
         
         # 2. Frequency MAE spatial plot
         scatter2 = axes[0, 1].scatter(lons, lats, c=freq_mae, cmap='plasma', s=100, alpha=0.8)
-        axes[0, 1].set_xlabel('Longitude')
-        axes[0, 1].set_ylabel('Latitude')
-        axes[0, 1].set_title('Frequency MAE by Spatial Bin')
+        axes[0, 1].set_xlabel('Synthetic Longitude (Bin ID × 15)')
+        axes[0, 1].set_ylabel('Synthetic Latitude (Bin ID × 10)')
+        axes[0, 1].set_title('Frequency MAE by Spatial Bin (Synthetic Coordinates)')
         plt.colorbar(scatter2, ax=axes[0, 1], label='MAE')
         axes[0, 1].grid(True, alpha=0.3)
         
@@ -888,9 +1111,9 @@ def create_spatial_analysis_plots(save_path: Path,
                 mag_corrs.append(0.0)
         
         scatter3 = axes[1, 0].scatter(lons, lats, c=mag_corrs, cmap='RdBu_r', s=100, alpha=0.8, vmin=-1, vmax=1)
-        axes[1, 0].set_xlabel('Longitude')
-        axes[1, 0].set_ylabel('Latitude')
-        axes[1, 0].set_title('Magnitude Correlation by Spatial Bin')
+        axes[1, 0].set_xlabel('Synthetic Longitude (Bin ID × 15)')
+        axes[1, 0].set_ylabel('Synthetic Latitude (Bin ID × 10)')
+        axes[1, 0].set_title('Magnitude Correlation by Spatial Bin (Synthetic Coordinates)')
         plt.colorbar(scatter3, ax=axes[1, 0], label='Correlation')
         axes[1, 0].grid(True, alpha=0.3)
         
@@ -904,9 +1127,9 @@ def create_spatial_analysis_plots(save_path: Path,
                 freq_corrs.append(0.0)
         
         scatter4 = axes[1, 1].scatter(lons, lats, c=freq_corrs, cmap='RdBu_r', s=100, alpha=0.8, vmin=-1, vmax=1)
-        axes[1, 1].set_xlabel('Longitude')
-        axes[1, 1].set_ylabel('Latitude')
-        axes[1, 1].set_title('Frequency Correlation by Spatial Bin')
+        axes[1, 1].set_xlabel('Synthetic Longitude (Bin ID × 15)')
+        axes[1, 1].set_ylabel('Synthetic Latitude (Bin ID × 10)')
+        axes[1, 1].set_title('Frequency Correlation by Spatial Bin (Synthetic Coordinates)')
         plt.colorbar(scatter4, ax=axes[1, 1], label='Correlation')
         axes[1, 1].grid(True, alpha=0.3)
         
@@ -1042,6 +1265,13 @@ def main():
         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
         help='Logging level'
     )
+    parser.add_argument(
+        '--model',
+        type=str,
+        default='simple',
+        choices=['simple', 'attention', 'compare'],
+        help='Which model to train: simple (SharedLSTM), attention (AttentionSharedLSTM), or compare (both).'
+    )
     
     args = parser.parse_args()
     
@@ -1053,6 +1283,7 @@ def main():
     logger.info("Shared LSTM-based Earthquake Forecasting System")
     logger.info("=" * 80)
     logger.info(f"Mode: {args.mode}")
+    logger.info(f"Model: {args.model}")
     logger.info(f"Input data: {args.input_data}")
     logger.info(f"Output directory: {args.output_dir}")
     logger.info(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
@@ -1107,31 +1338,144 @@ def main():
             
             # Step 3: Create and train model
             logger.info("\n" + "="*50)
-            logger.info("STEP 3: SHARED LSTM MODEL TRAINING")
+            logger.info("STEP 3: MODEL TRAINING")
             logger.info("="*50)
             
-            model = create_shared_lstm_model(
-                input_features=datasets['input_features'],
-                metadata_features=datasets['metadata_features'],
-                lookback_years=args.lookback_years,
-                logger=logger
-            )
-            
             results_dir = output_dir / "results"
-            training_results = train_shared_lstm_model(
-                model=model,
-                train_loader=datasets['train_loader'],
-                val_loader=datasets['val_loader'],
-                test_loader=datasets['test_loader'],
-                save_dir=str(results_dir),
-                logger=logger,
-                num_epochs=args.num_epochs,
-                learning_rate=args.learning_rate,
-                weight_decay=args.weight_decay,
-                magnitude_weight=args.magnitude_weight,
-                frequency_weight=args.frequency_weight,
-                correlation_weight=args.correlation_weight
-            )
+            results_dir.mkdir(parents=True, exist_ok=True)
+            
+            if args.model == "simple":
+                logger.info("Training Simple Shared LSTM Model")
+                model = create_shared_lstm_model(
+                    input_features=datasets['input_features'],
+                    metadata_features=datasets['metadata_features'],
+                    lookback_years=args.lookback_years,
+                    logger=logger
+                )
+                
+                training_results = train_shared_lstm_model(
+                    model=model,
+                    train_loader=datasets['train_loader'],
+                    val_loader=datasets['val_loader'],
+                    test_loader=datasets['test_loader'],
+                    save_dir=str(results_dir),
+                    logger=logger,
+                    num_epochs=args.num_epochs,
+                    learning_rate=args.learning_rate,
+                    weight_decay=args.weight_decay,
+                    magnitude_weight=args.magnitude_weight,
+                    frequency_weight=args.frequency_weight,
+                    correlation_weight=args.correlation_weight
+                )
+                
+            elif args.model == "attention":
+                logger.info("Training Attention Shared LSTM Model")
+                model = create_attention_shared_lstm_model(
+                    input_features=datasets['input_features'],
+                    metadata_features=datasets['metadata_features'],
+                    lookback_years=args.lookback_years,
+                    logger=logger
+                )
+                
+                training_results = train_attention_shared_lstm_model(
+                    model=model,
+                    train_loader=datasets['train_loader'],
+                    val_loader=datasets['val_loader'],
+                    test_loader=datasets['test_loader'],
+                    save_dir=str(results_dir),
+                    logger=logger,
+                    num_epochs=args.num_epochs,
+                    learning_rate=args.learning_rate,
+                    weight_decay=args.weight_decay,
+                    magnitude_weight=args.magnitude_weight,
+                    frequency_weight=args.frequency_weight,
+                    correlation_weight=args.correlation_weight
+                )
+                
+            elif args.model == "compare":
+                logger.info("Training Both Models for Comparison")
+                # Create both models
+                simple_model = create_shared_lstm_model(
+                    input_features=datasets['input_features'],
+                    metadata_features=datasets['metadata_features'],
+                    lookback_years=args.lookback_years,
+                    logger=logger
+                )
+                
+                attention_model = create_attention_shared_lstm_model(
+                    input_features=datasets['input_features'],
+                    metadata_features=datasets['metadata_features'],
+                    lookback_years=args.lookback_years,
+                    logger=logger
+                )
+                
+                # Use ModelComparisonTrainer to train both models
+                comparison_trainer = ModelComparisonTrainer(
+                    train_loader=datasets['train_loader'],
+                    val_loader=datasets['val_loader'],
+                    test_loader=datasets['test_loader'],
+                    learning_rate=args.learning_rate,
+                    weight_decay=args.weight_decay,
+                    magnitude_weight=args.magnitude_weight,
+                    frequency_weight=args.frequency_weight,
+                    correlation_weight=args.correlation_weight,
+                    device='auto'
+                )
+                
+                # Train both models
+                simple_results = comparison_trainer.train_model(
+                    model=simple_model,
+                    model_name="SharedLSTM",
+                    max_epochs=args.num_epochs,
+                    patience=12
+                )
+                
+                attention_results = comparison_trainer.train_model(
+                    model=attention_model,
+                    model_name="AttentionSharedLSTM",
+                    max_epochs=args.num_epochs,
+                    patience=12
+                )
+                
+                # Save models with distinct names
+                simple_save_path = Path(results_dir) / "shared_best_model.pth"
+                attention_save_path = Path(results_dir) / "attention_best_model.pth"
+                
+                # Save the trained models
+                torch.save({
+                    'model_state_dict': simple_model.state_dict(),
+                    'model_config': {
+                        'input_seq_features': datasets['input_features'],
+                        'metadata_features': datasets['metadata_features'],
+                        'lookback_years': args.lookback_years,
+                        'lstm_hidden_1': 64,
+                        'lstm_hidden_2': 32,
+                        'dense_hidden': 32,
+                        'dropout_rate': 0.25,
+                        'freq_head_type': "linear"
+                    }
+                }, simple_save_path)
+                
+                torch.save({
+                    'model_state_dict': attention_model.state_dict(),
+                    'model_config': {
+                        'input_seq_features': datasets['input_features'],
+                        'metadata_features': datasets['metadata_features'],
+                        'lookback_years': args.lookback_years,
+                        'lstm_hidden_1': 64,
+                        'lstm_hidden_2': 32,
+                        'dense_hidden': 32,
+                        'dropout_rate': 0.25,
+                        'freq_head_type': "linear"
+                    }
+                }, attention_save_path)
+                
+                training_results = {
+                    'simple_model': simple_results,
+                    'attention_model': attention_results,
+                    'simple_model_path': str(simple_save_path),
+                    'attention_model_path': str(attention_save_path)
+                }
             
             logger.info(f"Training results saved to: {results_dir}")
         
@@ -1144,7 +1488,17 @@ def main():
             # Get appropriate data path
             if args.mode == 'full_pipeline':
                 data_path = output_dir / "processed_earthquake_catalog_annual_stats.csv"
-                model_path = output_dir / "results" / "best_model.pth"
+                
+                # Determine model path based on model type
+                if args.model == "simple":
+                    model_path = output_dir / "results" / "best_model.pth"
+                elif args.model == "attention":
+                    model_path = output_dir / "results" / "attention_best_model.pth"
+                elif args.model == "compare":
+                    # For comparison mode, evaluate both models
+                    simple_model_path = output_dir / "results" / "shared_best_model.pth"
+                    attention_model_path = output_dir / "results" / "attention_best_model.pth"
+                    model_path = simple_model_path  # Default for now
                 
                 # 🔧 FIX: Use cached datasets from training to ensure consistency
                 if 'datasets' in locals():
@@ -1163,7 +1517,17 @@ def main():
                     )
             else:
                 data_path = args.input_data
-                model_path = output_dir / "results" / "best_model.pth"
+                # Determine model path based on model type
+                if args.model == "simple":
+                    model_path = output_dir / "results" / "best_model.pth"
+                elif args.model == "attention":
+                    model_path = output_dir / "results" / "attention_best_model.pth"
+                elif args.model == "compare":
+                    # For comparison mode, evaluate both models
+                    simple_model_path = output_dir / "results" / "shared_best_model.pth"
+                    attention_model_path = output_dir / "results" / "attention_best_model.pth"
+                    model_path = simple_model_path  # Default for now
+                
                 evaluation_datasets = create_shared_lstm_datasets(
                     data_path=str(data_path),
                     lookback_years=args.lookback_years,
@@ -1179,24 +1543,98 @@ def main():
                 logger.error("Please train the model first or use --mode full_pipeline")
                 sys.exit(1)
             
-            evaluation_results = evaluate_shared_lstm_model(
-                model_path=str(model_path),
-                test_loader=evaluation_datasets['test_loader'],
-                save_dir=str(output_dir / "results"),
-                logger=logger
-            )
-            
-            # Step 5: Generate Visualizations
-            logger.info("\n" + "="*50)
-            logger.info("STEP 5: GENERATING COMPREHENSIVE VISUALIZATIONS")
-            logger.info("="*50)
-            
-            generate_comprehensive_visualizations(
-                save_dir=str(output_dir / "results"),
-                model_path=str(model_path),
-                test_loader=evaluation_datasets['test_loader'],  # Use cached datasets
-                logger=logger
-            )
+            # Handle evaluation based on model type
+            if args.model == "compare":
+                logger.info("Evaluating both models from comparison...")
+                
+                # Evaluate simple model
+                logger.info("Evaluating Simple Shared LSTM Model...")
+                # Create subdirectories for evaluation results
+                (output_dir / "results" / "simple_model").mkdir(parents=True, exist_ok=True)
+                simple_evaluation_results = evaluate_shared_lstm_model(
+                    model_path=str(simple_model_path),
+                    test_loader=evaluation_datasets['test_loader'],
+                    save_dir=str(output_dir / "results" / "simple_model"),
+                    logger=logger,
+                    model_type="simple"
+                )
+                
+                # Evaluate attention model
+                logger.info("Evaluating Attention Shared LSTM Model...")
+                # Create subdirectories for evaluation results
+                (output_dir / "results" / "attention_model").mkdir(parents=True, exist_ok=True)
+                attention_evaluation_results = evaluate_shared_lstm_model(
+                    model_path=str(attention_model_path),
+                    test_loader=evaluation_datasets['test_loader'],
+                    save_dir=str(output_dir / "results" / "attention_model"),
+                    logger=logger,
+                    model_type="attention"
+                )
+                
+                evaluation_results = {
+                    'simple_model': simple_evaluation_results,
+                    'attention_model': attention_evaluation_results
+                }
+                
+                # Generate visualizations for both models
+                logger.info("\n" + "="*50)
+                logger.info("STEP 5: GENERATING COMPREHENSIVE VISUALIZATIONS")
+                logger.info("="*50)
+                
+                # Visualizations for simple model
+                logger.info("Generating visualizations for Simple Shared LSTM Model...")
+                generate_comprehensive_visualizations(
+                    save_dir=str(output_dir / "results" / "simple_model"),
+                    model_path=str(simple_model_path),
+                    test_loader=evaluation_datasets['test_loader'],
+                    logger=logger,
+                    model_type="simple"
+                )
+                
+                # Visualizations for attention model
+                logger.info("Generating visualizations for Attention Shared LSTM Model...")
+                generate_comprehensive_visualizations(
+                    save_dir=str(output_dir / "results" / "attention_model"),
+                    model_path=str(attention_model_path),
+                    test_loader=evaluation_datasets['test_loader'],
+                    logger=logger,
+                    model_type="attention"
+                )
+                
+            else:
+                # Single model evaluation
+                # Determine model type based on the model path
+                if "attention" in str(model_path):
+                    model_type = "attention"
+                else:
+                    model_type = "simple"
+                
+                evaluation_results = evaluate_shared_lstm_model(
+                    model_path=str(model_path),
+                    test_loader=evaluation_datasets['test_loader'],
+                    save_dir=str(output_dir / "results"),
+                    logger=logger,
+                    model_type=model_type
+                )
+                
+                # Step 5: Generate Visualizations
+                logger.info("\n" + "="*50)
+                logger.info("STEP 5: GENERATING COMPREHENSIVE VISUALIZATIONS")
+                logger.info("="*50)
+                
+                # Determine model type for visualization
+                if "attention" in str(model_path):
+                    viz_model_type = "attention"
+                else:
+                    viz_model_type = "simple"
+                
+                generate_comprehensive_visualizations(
+                    save_dir=str(output_dir / "results"),
+                    model_path=str(model_path),
+                    test_loader=evaluation_datasets['test_loader'],  # Use cached datasets
+                    logger=logger,
+                    model_type=viz_model_type
+                )
         
         if args.mode == 'compare_models':
             # Model Comparison Mode
@@ -1228,6 +1666,8 @@ def main():
             )
             
             # Run model comparison
+            # Ensure results directory exists
+            (output_dir / "results").mkdir(parents=True, exist_ok=True)
             comparison_results = run_model_comparison(
                 datasets=datasets,
                 save_dir=str(output_dir / "results"),
@@ -1254,7 +1694,12 @@ def main():
         logger.info("The system has completed the full pipeline:")
         logger.info("1. [SUCCESS] Preprocessed earthquake data (filtered shallow, spatial binned)")
         logger.info("2. [SUCCESS] Created shared LSTM datasets with rolling features")
-        logger.info("3. [SUCCESS] Trained shared LSTM model with dual output heads")
+        if args.model == "simple":
+            logger.info("3. [SUCCESS] Trained simple shared LSTM model with dual output heads")
+        elif args.model == "attention":
+            logger.info("3. [SUCCESS] Trained attention shared LSTM model with dual output heads")
+        elif args.model == "compare":
+            logger.info("3. [SUCCESS] Trained both simple and attention shared LSTM models for comparison")
         logger.info("4. [SUCCESS] Evaluated model performance using comprehensive metrics")
         logger.info("5. [SUCCESS] Generated comprehensive visualizations and spatial analysis")
         logger.info("")

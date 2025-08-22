@@ -268,7 +268,7 @@ class EarthquakeProcessor:
         
         original_rows = len(annual_stats)
         filled_rows = len(filled_df)
-        self.logger.info(f"Zero-filling: {original_rows} original rows → {filled_rows} filled rows")
+        self.logger.info(f"Zero-filling: {original_rows} original rows -> {filled_rows} filled rows")
         
         return filled_df
     

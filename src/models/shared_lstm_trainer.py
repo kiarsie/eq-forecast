@@ -43,12 +43,16 @@ class SharedLSTMTrainer:
                  magnitude_weight: float = 2.0,      # alpha: weight for magnitude loss (increased)
                  frequency_weight: float = 1.0,      # beta: weight for frequency loss (increased from 0.5)
                  correlation_weight: float = 0.0,    # gamma: weight for correlation penalty (disabled)
-                 device: str = 'auto'):
+                 device: str = 'auto',
+                 save_dir: str = None):
         """
         Initialize the trainer.
         
-        🔧 REFACTOR: Updated loss weights to α=2.0, β=1.0, γ=0.0 to address prediction collapse.
+        REFACTOR: Updated loss weights to α=2.0, β=1.0, γ=0.0 to address prediction collapse.
         """
+        # FIX: Create logger first to avoid AttributeError
+        self.logger = logging.getLogger(__name__)
+        
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -58,6 +62,7 @@ class SharedLSTMTrainer:
         self.magnitude_weight = magnitude_weight      # alpha
         self.frequency_weight = frequency_weight      # beta
         self.correlation_weight = correlation_weight  # gamma
+        self.save_dir = save_dir
         
         # Device setup
         if device == 'auto':
@@ -80,15 +85,43 @@ class SharedLSTMTrainer:
             weight_decay=weight_decay
         )
         
+        # 🔧 NEW: Create separate parameter groups for different learning rates
+        # Main model parameters
+        main_params = []
+        scaling_params = []
+        
+        for name, param in self.model.named_parameters():
+            if 'frequency_scale' in name or 'frequency_bias' in name:
+                scaling_params.append(param)
+            else:
+                main_params.append(param)
+        
+        # Create optimizer with different learning rates
+        self.optimizer = optim.Adam([
+            {'params': main_params, 'lr': learning_rate, 'weight_decay': weight_decay},
+            {'params': scaling_params, 'lr': learning_rate * 10.0, 'weight_decay': weight_decay * 2.0}  # 10x higher LR, 2x higher WD for scaling
+        ])
+        
+        self.logger.info(f"  - Main parameters: LR={learning_rate}, Weight decay={weight_decay}")
+        self.logger.info(f"  - Frequency scaling parameters: LR={learning_rate * 10.0}, Weight decay={weight_decay * 2.0}")
+        
         # 🔧 REFACTOR: Keep gradient clipping at 0.5 for stability
         self.max_grad_norm = 0.5
         
-        # 🔧 REFACTOR: Keep CosineAnnealingWarmRestarts scheduler
+        # REFACTOR: Keep CosineAnnealingWarmRestarts scheduler
         self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
             self.optimizer,
             T_0=10,
             T_mult=2,
             eta_min=1e-6
+        )
+        
+        # NEW: Enhanced learning rate scheduling for better adaptation
+        self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            self.optimizer,
+            T_0=15,  # Increased from 10 to 15 for more stable learning
+            T_mult=2,
+            eta_min=1e-7  # Lower minimum LR for better fine-tuning
         )
         
         # Training history
@@ -99,7 +132,7 @@ class SharedLSTMTrainer:
         self.val_magnitude_losses = []
         self.val_frequency_losses = []
         
-        # 🔧 REFACTOR: Enhanced metrics tracking
+        # REFACTOR: Enhanced metrics tracking
         self.train_magnitude_mae = []
         self.train_frequency_mae = []
         self.train_magnitude_corr = []
@@ -111,10 +144,9 @@ class SharedLSTMTrainer:
         
         # Early stopping
         self.best_val_loss = float('inf')
-        self.patience = 10
+        self.patience = 20  
         self.patience_counter = 0
         
-        self.logger = logging.getLogger(__name__)
         self.logger.info(f"SharedLSTMTrainer initialized on {self.device}")
         self.logger.info(f"Learning rate: {learning_rate}, Weight decay: {weight_decay}")
         self.logger.info(f"Loss weights: alpha(magnitude)={magnitude_weight}, beta(frequency)={frequency_weight}, gamma(correlation)={correlation_weight}")
@@ -134,13 +166,13 @@ class SharedLSTMTrainer:
         total_magnitude_loss = 0.0
         total_frequency_loss = 0.0
         
-        # 🔧 REFACTOR: Enhanced metrics tracking
+        # REFACTOR: Enhanced metrics tracking
         total_magnitude_mae = 0.0
         total_frequency_mae = 0.0
         total_magnitude_corr = 0.0
         total_frequency_corr = 0.0
         
-        # 🔧 REFACTOR: Debug logging for prediction ranges
+        # REFACTOR: Debug logging for prediction ranges
         magnitude_preds = []
         frequency_preds = []
         
@@ -166,11 +198,11 @@ class SharedLSTMTrainer:
             # Forward pass
             magnitude_pred, frequency_pred = self.model(input_seq, metadata)
             
-            # 🔧 REFACTOR: Collect predictions for debug logging
+            # REFACTOR: Collect predictions for debug logging
             magnitude_preds.append(magnitude_pred.detach().cpu())
             frequency_preds.append(frequency_pred.detach().cpu())
             
-            # 🔧 REFACTOR: Debug logging for prediction ranges to detect collapsing outputs
+            # REFACTOR: Debug logging for prediction ranges to detect collapsing outputs
             if batch_idx == 0:  # Log first batch of each epoch
                 freq_min = torch.min(frequency_pred).item()
                 freq_max = torch.max(frequency_pred).item()
@@ -182,7 +214,7 @@ class SharedLSTMTrainer:
             magnitude_true = target_seq[:, 0]  # (batch_size,) - max_magnitude
             frequency_true_normalized = target_seq[:, 1]  # (batch_size,) - frequency (NORMALIZED)
             
-            # 🔧 REFACTOR: Denormalize frequency for loss computation
+            # REFACTOR: Denormalize frequency for loss computation
             frequency_true = torch.tensor([
                 self.train_loader.dataset.denormalize_single_feature(freq.item(), 'frequency')
                 for freq in frequency_true_normalized
@@ -233,7 +265,7 @@ class SharedLSTMTrainer:
                 'Freq_Loss': f"{loss_components['frequency_loss'].item():.4f}"
             })
         
-        #  REFACTOR: Log per-epoch mean/std of predictions for both magnitude and frequency
+        # 🔧 REFACTOR: Log per-epoch mean/std of predictions for both magnitude and frequency
         if magnitude_preds and frequency_preds:
             magnitude_preds_tensor = torch.cat(magnitude_preds, dim=0)
             frequency_preds_tensor = torch.cat(frequency_preds, dim=0)
@@ -246,6 +278,25 @@ class SharedLSTMTrainer:
             self.logger.info(f"Epoch {getattr(self, 'current_epoch', 'N/A')} - Predictions Summary:")
             self.logger.info(f"  Magnitude: mean={mag_mean:.4f}, std={mag_std:.4f}")
             self.logger.info(f"  Frequency: mean={freq_mean:.4f}, std={freq_std:.4f}")
+            
+            # NEW: Monitor frequency scaling parameters to ensure they're learning properly
+            if hasattr(self.model, 'frequency_scale') and self.model.frequency_scale is not None:
+                scale_value = self.model.frequency_scale.item()
+                bias_value = self.model.frequency_bias.item() if hasattr(self.model, 'frequency_bias') else 0.0
+                
+                # NEW: Monitor gradients for scaling parameters
+                scale_grad = self.model.frequency_scale.grad.item() if self.model.frequency_scale.grad is not None else 0.0
+                bias_grad = self.model.frequency_bias.grad.item() if self.model.frequency_bias.grad is not None else 0.0
+                
+                self.logger.info(f"  Frequency scaling: scale={scale_value:.4f}, bias={bias_value:.4f}")
+                self.logger.info(f"  Frequency gradients: scale_grad={scale_grad:.6f}, bias_grad={bias_grad:.6f}")
+                
+                # Warn if scaling parameters are not learning (stuck at initialization)
+                if abs(scale_value - 5.0) < 0.01 and abs(bias_value - 1.0) < 0.01:
+                    self.logger.warning(f"  [WARNING] Frequency scaling parameters may not be learning (scale={scale_value:.4f}, bias={bias_value:.4f})")
+                # NEW: Warn if gradients are too small
+                elif abs(scale_grad) < 1e-6 and abs(bias_grad) < 1e-6:
+                    self.logger.warning(f"  [WARNING] Frequency scaling gradients are very small (scale_grad={scale_grad:.6f}, bias_grad={bias_grad:.6f})")
         
         # Calculate averages
         avg_loss = total_loss / num_batches
@@ -643,8 +694,13 @@ class SharedLSTMTrainer:
             self.logger.warning(f"[WARNING] Frequency predictions collapsed (check scaling): pred_std={freq_pred_std:.3f}, target_std={freq_target_std:.3f}")
         
         # 🔧 ENHANCED: Add interpretability metrics
-        # Magnitude accuracy (within ±0.3 magnitude units) - tightened for realism
-        magnitude_accuracy = np.mean(np.abs(magnitude_predictions - magnitude_targets) <= 0.3)
+        # Magnitude accuracy with multiple tolerance levels for better diagnosis
+        magnitude_accuracy_05 = np.mean(np.abs(magnitude_predictions - magnitude_targets) <= 0.5)
+        magnitude_accuracy_03 = np.mean(np.abs(magnitude_predictions - magnitude_targets) <= 0.3)
+        magnitude_accuracy_01 = np.mean(np.abs(magnitude_predictions - magnitude_targets) <= 0.1)
+        
+        # Use the strictest tolerance for the main metric
+        magnitude_accuracy = magnitude_accuracy_01
         
         # Frequency accuracy (within ±1 count) - computed on raw counts
         frequency_accuracy = np.mean(np.abs(frequency_raw_predictions - frequency_targets) <= 1.0)
@@ -653,11 +709,33 @@ class SharedLSTMTrainer:
         magnitude_rel_error = np.mean(np.abs(magnitude_predictions - magnitude_targets) / (np.abs(magnitude_targets) + 1e-8))
         frequency_rel_error = np.mean(np.abs(frequency_raw_predictions - frequency_targets) / (np.abs(frequency_targets) + 1e-8))
         
-        # Log interpretability metrics
-        self.logger.info(f"Magnitude Accuracy (±0.5): {magnitude_accuracy:.3f} ({magnitude_accuracy*100:.1f}%)")
+        # Log interpretability metrics with multiple tolerance levels
+        self.logger.info(f"Magnitude Accuracy (±0.1): {magnitude_accuracy_01:.3f} ({magnitude_accuracy_01*100:.1f}%)")
+        self.logger.info(f"Magnitude Accuracy (±0.3): {magnitude_accuracy_03:.3f} ({magnitude_accuracy_03*100:.1f}%)")
+        self.logger.info(f"Magnitude Accuracy (±0.5): {magnitude_accuracy_05:.3f} ({magnitude_accuracy_05*100:.1f}%)")
         self.logger.info(f"Frequency Accuracy (±1): {frequency_accuracy:.3f} ({frequency_accuracy*100:.1f}%)")
         self.logger.info(f"Magnitude Relative Error: {magnitude_rel_error:.3f}")
         self.logger.info(f"Frequency Relative Error: {frequency_rel_error:.3f}")
+        
+        # 🔧 NEW: Add detailed magnitude diagnostics
+        mag_pred_min, mag_pred_max = np.min(magnitude_predictions), np.max(magnitude_predictions)
+        mag_target_min, mag_target_max = np.min(magnitude_targets), np.max(magnitude_targets)
+        mag_pred_std = np.std(magnitude_predictions)
+        mag_target_std = np.std(magnitude_targets)
+        
+        self.logger.info(f"Magnitude Details:")
+        self.logger.info(f"  Predictions: [{mag_pred_min:.3f}, {mag_pred_max:.3f}] (std: {mag_pred_std:.3f})")
+        self.logger.info(f"  Targets: [{mag_target_min:.3f}, {mag_target_max:.3f}] (std: {mag_target_std:.3f})")
+        self.logger.info(f"  Prediction range: {mag_pred_max - mag_pred_min:.3f}")
+        self.logger.info(f"  Target range: {mag_target_max - mag_target_min:.3f}")
+        
+        # Check for magnitude prediction collapse
+        if mag_pred_std < mag_target_std * 0.1:
+            self.logger.warning(f"  [WARNING] Magnitude predictions collapsed: pred_std={mag_pred_std:.3f}, target_std={mag_target_std:.3f}")
+        elif mag_pred_std < mag_target_std * 0.3:
+            self.logger.warning(f"  [WARNING] Magnitude predictions may be too narrow: pred_std={mag_pred_std:.3f}, target_std={mag_target_std:.3f}")
+        else:
+            self.logger.info(f"  [GOOD] Magnitude prediction range looks healthy")
         
         # 🔧 WARNING: Check for metric inconsistencies
         # High accuracy with narrow prediction ranges suggests scale mismatch
@@ -743,13 +821,21 @@ class SharedLSTMTrainer:
             
             plt.tight_layout()
             
-            # Save diagnostic plot
-            import os
-            save_dir = os.path.dirname(os.path.abspath(__file__))
-            save_dir = os.path.join(save_dir, '..', '..', '..', 'data', 'results')
-            os.makedirs(save_dir, exist_ok=True)
+            # Use the save_dir parameter if available, otherwise fall back to data/results
+            if hasattr(self, 'save_dir') and self.save_dir:
+                plot_save_dir = self.save_dir
+            else:
+                # Fallback to data/results in the current working directory
+                plot_save_dir = os.path.join(os.getcwd(), 'data', 'results')
             
-            plot_path = os.path.join(save_dir, 'prediction_vs_target_histograms.png')
+            os.makedirs(plot_save_dir, exist_ok=True)
+            
+            # FIX: Include model type in filename to prevent overwriting between different models
+            model_type = "shared_lstm"  # Default for this trainer
+            if hasattr(self.model, '__class__'):
+                model_type = self.model.__class__.__name__.lower().replace('model', '')
+            
+            plot_path = os.path.join(plot_save_dir, f'prediction_vs_target_histograms_{model_type}.png')
             plt.savefig(plot_path, dpi=300, bbox_inches='tight')
             plt.close()
             
@@ -773,7 +859,7 @@ class SharedLSTMTrainer:
             'frequency_mae': frequency_mae,                  # NEW: MAE on exp(log(λ))
             'frequency_corr': frequency_corr,                # NEW: Correlation on exp(log(λ))
             'frequency_mse': frequency_mse,                  # NEW: MSE on exp(log(λ)) for comparison
-            # 🔧 ENHANCED: Interpretability metrics
+            # ENHANCED: Interpretability metrics
             'magnitude_accuracy': magnitude_accuracy,        # NEW: Accuracy within ±0.5
             'frequency_accuracy': frequency_accuracy,        # NEW: Accuracy within ±1
             'magnitude_rel_error': magnitude_rel_error,      # NEW: Relative error
@@ -793,7 +879,7 @@ class SharedLSTMTrainer:
                 'train_frequency_losses': self.train_frequency_losses,
                 'val_magnitude_losses': self.val_magnitude_losses,
                 'val_frequency_losses': self.val_frequency_losses,
-                # 🔧 IMPROVEMENT: Store enhanced metrics
+                # IMPROVEMENT: Store enhanced metrics
                 'train_magnitude_mae': self.train_magnitude_mae,
                 'train_frequency_mae': self.train_frequency_mae,
                 'train_magnitude_corr': self.train_magnitude_corr,
@@ -810,28 +896,50 @@ class SharedLSTMTrainer:
         """Load the model from a file."""
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.best_val_loss = checkpoint['best_val_loss']
         
-        # Restore training history
-        history = checkpoint['training_history']
-        self.train_losses = history['train_losses']
-        self.val_losses = history['val_losses']
-        self.train_magnitude_losses = history['train_magnitude_losses']
-        self.train_frequency_losses = history['train_frequency_losses']
-        self.val_magnitude_losses = history['val_magnitude_losses']
-        self.val_frequency_losses = history['val_frequency_losses']
+        # FIX: Handle missing optimizer state (e.g., from compare mode)
+        if 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.logger.info("Optimizer state restored from checkpoint")
+        else:
+            self.logger.info("No optimizer state in checkpoint (evaluation mode)")
         
-        # 🔧 IMPROVEMENT: Restore enhanced metrics
-        if 'train_magnitude_mae' in history:
-            self.train_magnitude_mae = history['train_magnitude_mae']
-            self.train_frequency_mae = history['train_frequency_mae']
-            self.train_magnitude_corr = history['train_magnitude_corr']
-            self.train_frequency_corr = history['train_frequency_corr']
-            self.val_magnitude_mae = history['val_magnitude_mae']
-            self.val_frequency_mae = history['val_frequency_mae']
-            self.val_magnitude_corr = history['val_magnitude_corr']
-            self.val_frequency_corr = history['val_frequency_corr']
+        # 🔧 FIX: Handle missing best_val_loss (e.g., from compare mode)
+        if 'best_val_loss' in checkpoint:
+            self.best_val_loss = checkpoint['best_val_loss']
+        else:
+            self.best_val_loss = float('inf')
+            self.logger.info("No best validation loss in checkpoint, setting to infinity")
+        
+        # 🔧 FIX: Handle missing training history (e.g., from compare mode)
+        if 'training_history' in checkpoint:
+            history = checkpoint['training_history']
+            self.train_losses = history.get('train_losses', [])
+            self.val_losses = history.get('val_losses', [])
+            self.train_magnitude_losses = history.get('train_magnitude_losses', [])
+            self.train_frequency_losses = history.get('train_frequency_losses', [])
+            self.val_magnitude_losses = history.get('val_magnitude_losses', [])
+            self.val_frequency_losses = history.get('val_frequency_losses', [])
+            
+            # 🔧 IMPROVEMENT: Restore enhanced metrics
+            if 'train_magnitude_mae' in history:
+                self.train_magnitude_mae = history['train_magnitude_mae']
+                self.train_frequency_mae = history['train_frequency_mae']
+                self.train_magnitude_corr = history['train_magnitude_corr']
+                self.train_frequency_corr = history['train_frequency_corr']
+                self.val_magnitude_mae = history['val_magnitude_mae']
+                self.val_frequency_mae = history['val_frequency_mae']
+                self.val_magnitude_corr = history['val_magnitude_corr']
+                self.val_frequency_corr = history['val_frequency_corr']
+        else:
+            self.logger.info("No training history in checkpoint (evaluation mode)")
+            # Initialize empty lists for evaluation
+            self.train_losses = []
+            self.val_losses = []
+            self.train_magnitude_losses = []
+            self.train_frequency_losses = []
+            self.val_magnitude_losses = []
+            self.val_frequency_losses = []
         
         self.logger.info(f"Model loaded from {path}")
     
