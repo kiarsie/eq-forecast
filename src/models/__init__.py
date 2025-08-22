@@ -2,21 +2,24 @@
 Models module for earthquake forecasting.
 
 This module contains:
-- AttentionLSTM: LSTM with attention mechanism
-- SimpleLSTM: Baseline LSTM without attention
-- QuadtreeEarthquakeDataset: Dataset for quadtree-based approach
+- SharedLSTMModel: Shared LSTM model for earthquake forecasting
+- SharedLSTMTrainer: Training utilities for shared LSTM
+- EnhancedSharedDataset: Enhanced dataset processor
 - QuadtreeModelTrainer: Training and evaluation utilities
+- ModelComparisonTrainer: Model comparison utilities
 """
 
-from .simple_lstm import SimpleLSTM
-from .attention_lstm import AttentionLSTM
-from .quadtree_data_loader import QuadtreeEarthquakeDataset, QuadtreeDataLoader
+from .shared_lstm_model import SharedLSTMModel, WeightedEarthquakeLoss
+from .shared_lstm_trainer import SharedLSTMTrainer
+from .enhanced_shared_processor import EnhancedSharedDataset
 from .quadtree_trainer import QuadtreeModelTrainer
+from .model_comparison_trainer import ModelComparisonTrainer
 
 __all__ = [
-    'SimpleLSTM',
-    'AttentionLSTM',
-    'QuadtreeEarthquakeDataset',
-    'QuadtreeDataLoader',
-    'QuadtreeModelTrainer'
+    'SharedLSTMModel',
+    'WeightedEarthquakeLoss',
+    'SharedLSTMTrainer',
+    'EnhancedSharedDataset',
+    'QuadtreeModelTrainer',
+    'ModelComparisonTrainer'
 ]

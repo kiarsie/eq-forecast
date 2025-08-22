@@ -248,7 +248,7 @@ def merge_adjacent_bins(bounds, lons, lats, threshold=50, max_bin_size=10.0):
     
     if coverage_ratio < 0.95:  # Allow 5% loss due to merging
         print("  ⚠️  WARNING: Significant coverage loss detected!")
-        print("  🔧 Attempting to restore coverage...")
+        print("  [TOOL] Attempting to restore coverage...")
         final_bounds = restore_coverage(bounds, final_bounds, lons, lats)
     
     return final_bounds
@@ -264,7 +264,7 @@ def get_coverage_area(bounds):
 
 def restore_coverage(original_bounds, merged_bounds, lons, lats):
     """Restore coverage by adding back bins that were lost during merging."""
-    print("  🔧 Restoring coverage...")
+    print("  [TOOL] Restoring coverage...")
     
     # Find bins that were lost
     lost_bins = []
@@ -500,10 +500,10 @@ class QuadtreeBinner:
         
     def assign_bins(self, lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
         """Assign bin IDs to earthquake locations using non-overlapping quadtree."""
-        print("🔧 Creating non-overlapping quadtree bins...")
+        print("[TOOL] Creating non-overlapping quadtree bins...")
         
         if self.custom_bounds:
-            print(f"🔧 Using custom bounds: {self.custom_bounds}")
+            print(f"[TOOL] Using custom bounds: {self.custom_bounds}")
             min_lon, max_lon, min_lat, max_lat = self.custom_bounds
             
             # Filter data to custom bounds
@@ -776,7 +776,7 @@ def find_mergeable_groups(bounds, bin_counts, threshold, max_bin_size):
     # If we still have low-count bins, try merging with ANY available bins (not just low-count ones)
     remaining_low_bins = [b for b in low_count_bins if b not in used_bins]
     if remaining_low_bins:
-        print(f"  🔧 Trying aggressive merges for {len(remaining_low_bins)} remaining low-count bins...")
+        print(f"  [TOOL] Trying aggressive merges for {len(remaining_low_bins)} remaining low-count bins...")
         
         for low_bin in remaining_low_bins:
             if low_bin in used_bins:
@@ -855,7 +855,7 @@ def enhanced_merge_adjacent_bins(bounds, lons, lats, threshold=50, max_bin_size=
     if not merge_groups:
         print("✅ No mergeable groups found")
     else:
-        print(f"🔧 Found {len(merge_groups)} mergeable groups")
+        print(f"[TOOL] Found {len(merge_groups)} mergeable groups")
         
         # Create a copy to work with
         working_bounds = bounds.copy()
@@ -977,7 +977,7 @@ def merge_below_threshold_bins(bounds, bin_counts, threshold, max_bin_size):
     
     # Apply all merges
     if merge_pairs:
-        print(f"🔧 Applying {len(merge_pairs)} adjacent merges...")
+        print(f"[TOOL] Applying {len(merge_pairs)} adjacent merges...")
         
         for low_bin, best_neighbor, merged_bin, total_count in merge_pairs:
             # Remove original bins

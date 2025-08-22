@@ -89,7 +89,43 @@ class EnhancedSharedDataset(Dataset):
         Returns:
             DataFrame with annual earthquake statistics per bin
         """
+        # Check if data is already processed annual statistics
+        if 'frequency' in self.raw_data.columns and 'bin_id' in self.raw_data.columns:
+            self.logger.info("Data appears to be pre-processed annual statistics. Using as-is.")
+            # Data is already processed, just ensure proper column names and types
+            processed_data = self.raw_data.copy()
+            
+            # Ensure year column exists and is numeric
+            if 'year' in processed_data.columns:
+                processed_data['year'] = pd.to_numeric(processed_data['year'], errors='coerce')
+            else:
+                self.logger.error("No 'year' column found in processed data")
+                raise ValueError("Processed data must contain 'year' column")
+            
+            # Ensure bin_id is string
+            processed_data['bin_id'] = processed_data['bin_id'].astype(str)
+            
+            # Filter for valid years (1910-2025)
+            processed_data = processed_data[
+                (processed_data['year'] >= 1910) & 
+                (processed_data['year'] <= 2025)
+            ].copy()
+            
+            # Sort by bin_id and year
+            processed_data = processed_data.sort_values(['bin_id', 'year']).reset_index(drop=True)
+            
+            self.logger.info(f"Using pre-processed data: {len(processed_data)} records, {processed_data['bin_id'].nunique()} bins")
+            self.logger.info(f"Year range: {processed_data['year'].min()} - {processed_data['year'].max()}")
+            
+            # 🔧 FIX: Return early for pre-processed data to avoid Depth column access
+            return processed_data
+        
+        # Original logic for raw earthquake catalog data
         # Filter for shallow events (<70 km depth)
+        if 'Depth' not in self.raw_data.columns:
+            self.logger.error("Raw data must contain 'Depth' column for shallow event filtering")
+            raise ValueError("Raw earthquake catalog data must contain 'Depth' column")
+            
         shallow_data = self.raw_data[self.raw_data['Depth'] < 70].copy()
         
         # Convert date to year
@@ -109,6 +145,10 @@ class EnhancedSharedDataset(Dataset):
         
         # Create spatial bins (simplified grid for now)
         # You can replace this with your quadtree binning logic
+        if 'N_Lat' not in shallow_data.columns or 'E_Long' not in shallow_data.columns:
+            self.logger.error("Raw data must contain 'N_Lat' and 'E_Long' columns for spatial binning")
+            raise ValueError("Raw earthquake catalog data must contain 'N_Lat' and 'E_Long' columns")
+            
         lat_bins = np.linspace(shallow_data['N_Lat'].min(), shallow_data['N_Lat'].max(), 8)
         lon_bins = np.linspace(shallow_data['E_Long'].min(), shallow_data['E_Long'].max(), 8)
         
@@ -218,8 +258,12 @@ class EnhancedSharedDataset(Dataset):
         """
         sequences = []
         
+        # 🔧 FIX: Ensure deterministic bin processing order
+        bin_ids = sorted(self.annual_data['bin_id'].unique())
+        self.logger.info(f"Processing {len(bin_ids)} bins in deterministic order")
+        
         # Group by bin_id
-        for bin_id in self.annual_data['bin_id'].unique():
+        for bin_id in bin_ids:
             bin_data = self.annual_data[self.annual_data['bin_id'] == bin_id].copy()
             bin_data = bin_data.sort_values('year').reset_index(drop=True)
             
@@ -259,6 +303,20 @@ class EnhancedSharedDataset(Dataset):
                         'target_years': target_sequence['year'].tolist()
                     })
         
+        # 🔧 ENHANCED: Log sequence distribution for debugging
+        train_count = sum(1 for seq in sequences if seq['split'] == 'train')
+        val_count = sum(1 for seq in sequences if seq['split'] == 'val')
+        test_count = sum(1 for seq in sequences if seq['split'] == 'test')
+        
+        self.logger.info(f"Sequence distribution: Train={train_count}, Val={val_count}, Test={test_count}")
+        
+        # Log test set target ranges for debugging
+        test_sequences = [seq for seq in sequences if seq['split'] == 'test']
+        if test_sequences:
+            test_freqs = [seq['target_sequence']['frequency'].iloc[0] for seq in test_sequences]
+            test_mags = [seq['target_sequence']['max_magnitude'].iloc[0] for seq in test_sequences]
+            self.logger.info(f"Test set target ranges - Frequency: [{min(test_freqs):.1f}, {max(test_freqs):.1f}], Magnitude: [{min(test_mags):.1f}, {max(test_mags):.1f}]")
+        
         return sequences
     
     def _setup_normalization(self):
@@ -267,21 +325,31 @@ class EnhancedSharedDataset(Dataset):
         all_max_magnitudes = self.annual_data['max_magnitude'].values
         all_frequencies = self.annual_data['frequency'].values
         
+        # 🔧 NEW: Add log1p normalization for frequency to fix compression
+        all_frequencies_log1p = np.log1p(all_frequencies)  # log(1 + frequency)
+        
         # Compute statistics
         self.max_magnitude_mean = np.mean(all_max_magnitudes)
         self.max_magnitude_std = np.std(all_max_magnitudes)
         self.frequency_mean = np.mean(all_frequencies)
         self.frequency_std = np.std(all_frequencies)
         
+        # 🔧 NEW: Log1p frequency normalization parameters
+        self.frequency_log1p_mean = np.mean(all_frequencies_log1p)
+        self.frequency_log1p_std = np.std(all_frequencies_log1p)
+        
         # Handle zero standard deviation
         if self.max_magnitude_std == 0:
             self.max_magnitude_std = 1.0
         if self.frequency_std == 0:
             self.frequency_std = 1.0
+        if self.frequency_log1p_std == 0:
+            self.frequency_log1p_std = 1.0
         
         self.logger.info(f"Normalization parameters:")
         self.logger.info(f"  Max Magnitude: mean={self.max_magnitude_mean:.3f}, std={self.max_magnitude_std:.3f}")
         self.logger.info(f"  Frequency: mean={self.frequency_mean:.3f}, std={self.frequency_std:.3f}")
+        self.logger.info(f"  Frequency (log1p): mean={self.frequency_log1p_mean:.3f}, std={self.frequency_log1p_std:.3f}")
     
     def _normalize_features(self, features: np.ndarray) -> np.ndarray:
         """Normalize features using z-score normalization."""
@@ -289,8 +357,18 @@ class EnhancedSharedDataset(Dataset):
             return features
         
         normalized = features.copy()
-        normalized[:, 0] = (normalized[:, 0] - self.max_magnitude_mean) / self.max_magnitude_std
-        normalized[:, 1] = (normalized[:, 1] - self.frequency_mean) / self.frequency_std
+        
+        # Handle both 1D and 2D arrays
+        if len(normalized.shape) == 1:
+            # 1D array: [magnitude, frequency]
+            normalized[0] = (normalized[0] - self.max_magnitude_mean) / self.max_magnitude_std
+            # 🔧 NEW: Use log1p normalization for frequency
+            normalized[1] = (np.log1p(normalized[1]) - self.frequency_log1p_mean) / self.frequency_log1p_std
+        else:
+            # 2D array: [batch, features] or [time, features]
+            normalized[:, 0] = (normalized[:, 0] - self.max_magnitude_mean) / self.max_magnitude_std
+            # 🔧 NEW: Use log1p normalization for frequency
+            normalized[:, 1] = (np.log1p(normalized[:, 1]) - self.frequency_log1p_mean) / self.frequency_log1p_std
         
         return normalized
     
@@ -304,14 +382,17 @@ class EnhancedSharedDataset(Dataset):
         # Handle different feature structures
         if features.shape[1] == 2:  # [magnitude, frequency]
             denormalized[:, 0] = denormalized[:, 0] * self.max_magnitude_std + self.max_magnitude_mean
-            denormalized[:, 1] = denormalized[:, 1] * self.frequency_std + self.frequency_mean
+            # 🔧 NEW: Denormalize frequency from log1p space back to raw counts
+            denormalized[:, 1] = np.expm1(denormalized[:, 1] * self.frequency_log1p_std + self.frequency_log1p_mean)
         elif features.shape[1] == 1:  # Single feature (e.g., just frequency)
             # Assume it's frequency if only one column
-            denormalized[:, 0] = denormalized[:, 0] * self.frequency_std + self.frequency_mean
+            # 🔧 NEW: Denormalize frequency from log1p space back to raw counts
+            denormalized[:, 0] = np.expm1(denormalized[:, 0] * self.frequency_log1p_std + self.frequency_log1p_mean)
         else:
             # Handle extended features (with rolling features)
             denormalized[:, 0] = denormalized[:, 0] * self.max_magnitude_std + self.max_magnitude_mean
-            denormalized[:, 1] = denormalized[:, 1] * self.frequency_std + self.frequency_mean
+            # 🔧 NEW: Denormalize frequency from log1p space back to raw counts
+            denormalized[:, 1] = np.expm1(denormalized[:, 1] * self.frequency_log1p_std + self.frequency_log1p_mean)
             
             # Handle rolling features if they exist
             if hasattr(self, 'rolling_count_3_std'):
@@ -361,9 +442,29 @@ class EnhancedSharedDataset(Dataset):
         if feature_type == 'magnitude':
             return feature_value * self.max_magnitude_std + self.max_magnitude_mean
         elif feature_type == 'frequency':
-            return feature_value * self.frequency_std + self.frequency_mean
+            # 🔧 NEW: Denormalize frequency from log1p space back to raw counts
+            return np.expm1(feature_value * self.frequency_log1p_std + self.frequency_log1p_mean)
         else:
             raise ValueError(f"Unknown feature type: {feature_type}")
+    
+    # 🔧 NEW: Add method to denormalize frequency from log1p space
+    def denormalize_frequency_log1p(self, normalized_log1p_value: float) -> float:
+        """
+        Denormalize frequency from normalized log1p space back to raw counts.
+        
+        Args:
+            normalized_log1p_value: Normalized log1p frequency value
+            
+        Returns:
+            Raw frequency count
+        """
+        if not self.normalize:
+            return normalized_log1p_value
+        
+        # Denormalize: normalized -> log1p -> raw
+        log1p_value = normalized_log1p_value * self.frequency_log1p_std + self.frequency_log1p_mean
+        raw_count = np.expm1(log1p_value)
+        return raw_count
     
     def __len__(self) -> int:
         """Return the number of sequences in the dataset."""
@@ -402,27 +503,43 @@ class EnhancedSharedDataset(Dataset):
             
             input_features.append(features)
         
-        # Extract target features
-        target_features = []
-        for _, row in sequence['target_sequence'].iterrows():
-            features = [
-                row['max_magnitude'],
-                row['frequency']
-            ]
-            target_features.append(features)
+        # Extract target features - take the first target year only
+        target_row = sequence['target_sequence'].iloc[0]
+        target_features = np.array([target_row['max_magnitude'], target_row['frequency']], dtype=np.float32)
         
         # Extract metadata features
         metadata_row = sequence['input_sequence'].iloc[0]
-        metadata_features = [
-            metadata_row['center_lat'],
-            metadata_row['center_lon'],
-            metadata_row['bin_area'],
-            metadata_row['year_normalized']
-        ]
+        
+        # 🔧 FIX: Use available columns for pre-processed data
+        # For pre-processed data, we don't have spatial coordinates, so use derived features
+        if 'center_lat' in metadata_row and 'center_lon' in metadata_row and 'bin_area' in metadata_row:
+            # Original spatial metadata (for raw data)
+            metadata_features = [
+                metadata_row['center_lat'],
+                metadata_row['center_lon'],
+                metadata_row['bin_area'],
+                metadata_row['year_normalized']
+            ]
+        else:
+            # 🔧 ADAPTED: Use available features for pre-processed data
+            # Convert bin_id to numeric for spatial encoding
+            bin_id_numeric = float(metadata_row['bin_id']) if metadata_row['bin_id'] != '-1' else 0.0
+            
+            # Use avg_depth as spatial feature (depth varies by location)
+            avg_depth = metadata_row.get('avg_depth', 10.0)  # Default to 10.0 if missing
+            
+            # Create derived spatial features from bin_id
+            # This gives the model some spatial context even without exact coordinates
+            metadata_features = [
+                bin_id_numeric,           # Spatial bin identifier
+                avg_depth,                # Average depth (spatial feature)
+                float(metadata_row['bin_id'] != '-1'),  # Is valid bin (0 or 1)
+                metadata_row['year_normalized']  # Temporal feature
+            ]
         
         # Convert to numpy arrays
         input_features = np.array(input_features, dtype=np.float32)
-        target_features = np.array(target_features, dtype=np.float32)
+        # target_features already created as 2D numpy array above
         metadata_features = np.array(metadata_features, dtype=np.float32)
         
         # Normalize features
@@ -451,4 +568,4 @@ class EnhancedSharedDataset(Dataset):
     def get_feature_dimensions(self) -> Tuple[int, int, int]:
         """Get input, target, and metadata feature dimensions."""
         sample_input, sample_target, sample_metadata, _ = self[0]
-        return sample_input.shape[1], sample_target.shape[1], sample_metadata.shape[0]
+        return sample_input.shape[1], len(sample_target), sample_metadata.shape[0]

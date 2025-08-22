@@ -5,9 +5,9 @@ Attention-Based Shared LSTM Model for Earthquake Forecasting
 Extends the shared LSTM with attention mechanism:
 - LSTM(64, return_sequences=True) → LSTM(32, return_sequences=True) with attention
 - Concatenation with bin metadata features
-- Dual output heads: magnitude (regression) and frequency (Poisson log-rate)
-- Weighted loss combining MSE (magnitude) and Poisson NLL (frequency)
-- 🔧 IMPROVEMENT: Same configurable loss weights α, β, γ as simple LSTM
+- Dual output heads: magnitude (regression) and frequency (Softplus activation)
+- Weighted loss combining MSE (magnitude) and MSE (frequency with log1p preprocessing)
+- 🔧 REFACTOR: Same configurable loss weights alpha=1.0, beta=1.0, gamma=0.0
 """
 
 import torch
@@ -16,7 +16,7 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Tuple, Dict, Optional
 import logging
-from .shared_lstm_model import WeightedEarthquakeLoss  # 🔧 IMPROVEMENT: Reuse the same loss function
+from .shared_lstm_model import WeightedEarthquakeLoss  # 🔧 REFACTOR: Use the same refactored loss function
 
 
 class MultiHeadAttention(nn.Module):
@@ -63,7 +63,7 @@ class MultiHeadAttention(nn.Module):
             scores = scores.masked_fill(mask == 0, -1e9)
         
         # Apply softmax and dropout
-        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = F.softmax(scores, dim=1)
         attn_weights = self.dropout(attn_weights)
         
         # Apply attention to values
@@ -87,10 +87,11 @@ class AttentionSharedLSTMModel(nn.Module):
                  metadata_features: int,
                  lookback_years: int = 10,
                  lstm_hidden_1: int = 64,
-                 lstm_hidden_2: int = 32,
+                 lstm_hidden_2: int = 64,
                  dense_hidden: int = 32,
                  dropout_rate: float = 0.25,
-                 num_attention_heads: int = 8):
+                 num_attention_heads: int = 4,
+                 freq_head_type: str = "linear"):
         super(AttentionSharedLSTMModel, self).__init__()
         
         self.input_seq_features = input_seq_features
@@ -101,6 +102,7 @@ class AttentionSharedLSTMModel(nn.Module):
         self.dense_hidden = dense_hidden
         self.dropout_rate = dropout_rate
         self.num_attention_heads = num_attention_heads
+        self.freq_head_type = freq_head_type
         
         # LSTM layers for sequential features
         self.lstm1 = nn.LSTM(
@@ -129,19 +131,40 @@ class AttentionSharedLSTMModel(nn.Module):
         self.dense1 = nn.Linear(combined_features, dense_hidden)
         self.dropout = nn.Dropout(dropout_rate)
         
-        # Dual output heads (same as SharedLSTMModel)
-        # Magnitude head (continuous, linear activation)
+        # [REFACTOR] Deeper MLP funnel for output heads (120 -> 90 -> 30 -> 30 -> 1)
+        # Magnitude head: deeper MLP funnel with Linear output (no activation)
         self.magnitude_head = nn.Sequential(
-            nn.Linear(dense_hidden, 16),
+            nn.Linear(dense_hidden, 120),
             nn.ReLU(),
-            nn.Linear(16, 1)
+            nn.Dropout(dropout_rate * 0.5),
+            nn.Linear(120, 90),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.3),
+            nn.Linear(90, 30),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.2),
+            nn.Linear(30, 30),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.1),
+            nn.Linear(30, 1)  # No activation for magnitude
         )
         
-        # Frequency head (Poisson log-rate)
+        # [REFACTOR] Frequency head: same funnel with Softplus activation (+1e-6)
         self.frequency_head = nn.Sequential(
-            nn.Linear(dense_hidden, 16),
+            nn.Linear(dense_hidden, 120),
             nn.ReLU(),
-            nn.Linear(16, 1)  # Linear activation for log-rate output
+            nn.Dropout(dropout_rate * 0.5),
+            nn.Linear(120, 90),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.3),
+            nn.Linear(90, 30),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.2),
+            nn.Linear(30, 30),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.1),
+            nn.Linear(30, 1),
+            nn.Softplus()  # Softplus activation for frequency
         )
         
         # Initialize weights
@@ -149,7 +172,13 @@ class AttentionSharedLSTMModel(nn.Module):
         
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"AttentionSharedLSTMModel initialized with {sum(p.numel() for p in self.parameters())} parameters")
-        self.logger.info(f"Attention heads: {num_attention_heads}, Frequency: Poisson formulation")
+        self.logger.info("[REFACTORING] APPLIED:")
+        self.logger.info(f"  - Attention heads: {num_attention_heads}")
+        self.logger.info("  - Attention output aggregation: Mean pooling across timesteps")
+        self.logger.info("  - Deeper MLP funnel: 120 → 90 → 30 → 30 → 1")
+        self.logger.info("  - Magnitude head: Linear output (no activation)")
+        self.logger.info("  - Frequency head: Softplus activation (+1e-6)")
+        self.logger.info("  - Removed BatchNorm from final output layers")
     
     def _init_weights(self):
         """Initialize model weights using Xavier initialization."""
@@ -176,7 +205,7 @@ class AttentionSharedLSTMModel(nn.Module):
             metadata: Bin metadata tensor of shape (batch_size, metadata_features)
             
         Returns:
-            Tuple of (magnitude_pred, frequency_log_rate_pred)
+            Tuple of (magnitude_pred, frequency_pred)
         """
         # LSTM processing
         lstm_out, _ = self.lstm1(input_sequence)
@@ -185,8 +214,13 @@ class AttentionSharedLSTMModel(nn.Module):
         # Apply attention over the sequence
         attended_seq = self.attention(lstm_out)
         
-        # Take the last attended hidden state
-        lstm_final = attended_seq[:, -1, :]  # (batch_size, lstm_hidden_2)
+        # 🔧 REFACTOR: Replace attended_seq[:, -1, :] with mean pooling across timesteps
+        # This uses all timesteps instead of just the last one, providing more stable representations
+        lstm_final = torch.mean(attended_seq, dim=1)  # (batch_size, lstm_hidden_2)
+        
+        # Alternative: Weighted sum across timesteps (uncomment if preferred)
+        # weights = F.softmax(torch.randn(attended_seq.size(1), device=attended_seq.device), dim=0)
+        # lstm_final = torch.sum(attended_seq * weights.unsqueeze(0).unsqueeze(-1), dim=1)
         
         # Concatenate LSTM output with metadata
         combined = torch.cat([lstm_final, metadata], dim=1)
@@ -198,18 +232,24 @@ class AttentionSharedLSTMModel(nn.Module):
         
         # Dual output heads
         magnitude_pred = self.magnitude_head(dense_out)
-        frequency_log_rate_pred = self.frequency_head(dense_out)  # log(λ)
+        frequency_pred = self.frequency_head(dense_out)  # Already has Softplus activation
+        frequency_pred = frequency_pred + 1e-6  # Add epsilon to prevent zero values
         
-        return magnitude_pred, frequency_log_rate_pred
+        return magnitude_pred, frequency_pred
     
-    def predict_frequency_counts(self, frequency_log_rate_pred: torch.Tensor) -> torch.Tensor:
+    def predict_frequency_counts(self, frequency_pred: torch.Tensor) -> torch.Tensor:
         """
-        Convert log-rate predictions to expected count predictions.
+        Convert frequency predictions to expected count predictions.
         
         Args:
-            frequency_log_rate_pred: log(λ) predictions
+            frequency_pred: frequency predictions with Softplus activation (in log1p space)
             
         Returns:
-            Expected count predictions: exp(log(λ)) = λ
+            Expected count predictions converted from log1p space to raw counts
         """
-        return torch.exp(frequency_log_rate_pred)
+        # Convert from log1p space back to raw counts using expm1
+        # frequency_pred is log(1 + λ), so λ = expm1(frequency_pred)
+        raw_counts = torch.expm1(frequency_pred)
+        
+        # Add small epsilon to prevent zero values
+        return raw_counts + 1e-6

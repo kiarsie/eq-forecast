@@ -1,294 +1,158 @@
-#!/usr/bin/env python3
-"""
-Attention LSTM Model for Earthquake Forecasting
-
-Extends the Simple LSTM with attention mechanism:
-- 4 hidden layers: 120, 90, 30, 30 neurons (same as Simple LSTM)
-- Attention mechanism over the sequence
-- Output layer: 1 neuron with sigmoid activation
-- Input: 10-year lookback of earthquake variables
-- Output: Forecasted earthquake variables (frequency, max magnitude)
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
+import logging
+from typing import Tuple
+
+
+class MultiHeadAttention(nn.Module):
+    """
+    Multi-head attention mechanism.
+    """
+    
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.1):
+        super(MultiHeadAttention, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        
+        assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+        
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, embed_dim = x.size()
+        
+        # Project to Q, K, V
+        q = self.q_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # Compute attention scores
+        scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, v)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, embed_dim)
+        
+        # Final projection
+        output = self.out_proj(attn_output)
+        return output
 
 
 class AttentionLSTM(nn.Module):
     """
-    Attention LSTM model extending the Simple LSTM architecture.
-    
-    Architecture:
-    - Same LSTM layers as Simple LSTM: 120, 90, 30, 30 neurons
-    - Attention mechanism over the sequence
-    - Output layer: 1 neuron with sigmoid
+    Attention-enhanced LSTM model for earthquake forecasting.
     """
     
     def __init__(self, 
                  input_size: int,
-                 hidden_sizes: Tuple[int, int, int, int] = (32, 32, 16, 16),
-                 dropout: float = 0.3,
-                 bidirectional: bool = False):
-        """
-        Initialize the Attention LSTM model.
-        
-        Args:
-            input_size: Number of input features
-            hidden_sizes: Tuple of 4 hidden layer sizes (default: 120, 90, 30, 30)
-            dropout: Dropout rate for regularization
-            bidirectional: Whether to use bidirectional LSTM
-        """
+                 hidden_sizes: Tuple[int, ...] = (64, 48, 24, 24),
+                 dropout: float = 0.2,
+                 bidirectional: bool = False,
+                 num_attention_heads: int = 8):
         super(AttentionLSTM, self).__init__()
-        
-        if len(hidden_sizes) != 4:
-            raise ValueError("hidden_sizes must be a tuple of exactly 4 values")
         
         self.input_size = input_size
         self.hidden_sizes = hidden_sizes
         self.dropout = dropout
         self.bidirectional = bidirectional
-        self.num_directions = 2 if bidirectional else 1
+        self.num_attention_heads = num_attention_heads
         
-        # LSTM layers following the paper's architecture (same as Simple LSTM)
-        self.lstm1 = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_sizes[0],
-            num_layers=1,
-            batch_first=True,
-            bidirectional=bidirectional,
-            dropout=0.0
+        # Calculate the multiplier for bidirectional LSTM
+        self.bidirectional_multiplier = 2 if bidirectional else 1
+        
+        # Create LSTM layers
+        self.lstm_layers = nn.ModuleList()
+        
+        # First LSTM layer
+        self.lstm_layers.append(
+            nn.LSTM(
+                input_size=input_size,
+                hidden_size=hidden_sizes[0],
+                batch_first=True,
+                bidirectional=bidirectional,
+                dropout=dropout if len(hidden_sizes) > 1 else 0
+            )
         )
         
-        self.lstm2 = nn.LSTM(
-            input_size=hidden_sizes[0] * self.num_directions,
-            hidden_size=hidden_sizes[1],
-            num_layers=1,
-            batch_first=True,
-            bidirectional=bidirectional,
-            dropout=0.0
-        )
+        # Additional LSTM layers
+        for i in range(1, len(hidden_sizes)):
+            self.lstm_layers.append(
+                nn.LSTM(
+                    input_size=hidden_sizes[i-1] * self.bidirectional_multiplier,
+                    hidden_size=hidden_sizes[i],
+                    batch_first=True,
+                    bidirectional=bidirectional,
+                    dropout=dropout if i < len(hidden_sizes) - 1 else 0
+                )
+            )
         
-        self.lstm3 = nn.LSTM(
-            input_size=hidden_sizes[1] * self.num_directions,
-            hidden_size=hidden_sizes[2],
-            num_layers=1,
-            batch_first=True,
-            bidirectional=bidirectional,
-            dropout=0.0
-        )
-        
-        self.lstm4 = nn.LSTM(
-            input_size=hidden_sizes[2] * self.num_directions,
-            hidden_size=hidden_sizes[3],
-            num_layers=1,
-            batch_first=True,
-            bidirectional=bidirectional,
-            dropout=0.0
-        )
-        
-        # Dropout layers
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        self.dropout3 = nn.Dropout(dropout)
-        self.dropout4 = nn.Dropout(dropout)
-        
-        # Attention mechanism
-        # Ensure embed_dim is divisible by num_heads
-        self.embed_dim = hidden_sizes[3] * self.num_directions
-        
-        # Find the largest number of heads that divides embed_dim evenly
-        if self.embed_dim % 8 == 0:
-            self.num_heads = 8  # 8 heads if divisible by 8
-        elif self.embed_dim % 4 == 0:
-            self.num_heads = 4  # 4 heads if divisible by 4
-        elif self.embed_dim % 2 == 0:
-            self.num_heads = 2  # 2 heads if divisible by 2
-        else:
-            self.num_heads = 1  # 1 head if not divisible by 2
-        
-
-            
-        self.attention = nn.MultiheadAttention(
-            embed_dim=self.embed_dim,
-            num_heads=self.num_heads,
-            batch_first=True,
+        # Attention mechanism over the sequence
+        final_hidden_size = hidden_sizes[-1] * self.bidirectional_multiplier
+        self.attention = MultiHeadAttention(
+            embed_dim=final_hidden_size,
+            num_heads=num_attention_heads,
             dropout=dropout
         )
         
-        # Attention output projection
-        self.attention_projection = nn.Linear(
-            hidden_sizes[3] * self.num_directions,
-            hidden_sizes[3] * self.num_directions
-        )
+        # Final output layer
+        self.output_layer = nn.Linear(final_hidden_size, 1)
         
-        # Output layer (2 neurons for frequency and magnitude)
-        self.output_layer = nn.Linear(
-            hidden_sizes[3] * self.num_directions, 
-            2  # Changed from 1 to 2 for frequency and magnitude
-        )
+        # Dropout layer
+        self.dropout_layer = nn.Dropout(dropout)
         
         # Initialize weights
         self._init_weights()
+        
+        self.logger = logging.getLogger(__name__)
+        self.logger.info(f"AttentionLSTM initialized with {sum(p.numel() for p in self.parameters())} parameters")
     
     def _init_weights(self):
-        """Initialize weights using Xavier/Glorot initialization."""
-        for name, param in self.named_parameters():
-            if 'weight' in name:
-                if 'lstm' in name:
-                    # LSTM weights
-                    nn.init.xavier_uniform_(param)
-                else:
-                    # Linear layer weights
-                    nn.init.xavier_uniform_(param)
-            elif 'bias' in name:
-                nn.init.constant_(param, 0.0)
+        """Initialize model weights using Xavier initialization."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LSTM):
+                for name, param in module.named_parameters():
+                    if 'weight' in name:
+                        nn.init.xavier_uniform_(param)
+                    elif 'bias' in name:
+                        nn.init.zeros_(param)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through the Attention LSTM network.
+        Forward pass through the attention-enhanced model.
         
         Args:
             x: Input tensor of shape (batch_size, sequence_length, input_size)
             
         Returns:
-            Output tensor of shape (batch_size, 2) for frequency and magnitude
+            Output tensor of shape (batch_size, 1)
         """
-        batch_size, seq_len, _ = x.size()
-        
-        # LSTM Layer 1: 120 neurons
-        lstm1_out, (h1, c1) = self.lstm1(x)
-        lstm1_out = self.dropout1(lstm1_out)
-        
-        # LSTM Layer 2: 90 neurons
-        lstm2_out, (h2, c2) = self.lstm2(lstm1_out)
-        lstm2_out = self.dropout2(lstm2_out)
-        
-        # LSTM Layer 3: 30 neurons
-        lstm3_out, (h3, c3) = self.lstm3(lstm2_out)
-        lstm3_out = self.dropout3(lstm3_out)
-        
-        # LSTM Layer 4: 30 neurons
-        lstm4_out, (h4, c4) = self.lstm4(lstm3_out)
-        lstm4_out = self.dropout4(lstm4_out)
+        # Pass through LSTM layers
+        for lstm in self.lstm_layers:
+            x, _ = lstm(x)
         
         # Apply attention mechanism
-        # lstm4_out shape: (batch_size, seq_len, hidden_size[3] * num_directions)
-        attended_output, attention_weights = self.attention(
-            query=lstm4_out,
-            key=lstm4_out,
-            value=lstm4_out
-        )
+        x = self.attention(x)
         
-        # Project attention output
-        attended_output = self.attention_projection(attended_output)
+        # Take the last output from the sequence
+        x = x[:, -1, :]
         
-        # Global average pooling over sequence dimension
-        # Shape: (batch_size, hidden_size[3] * num_directions)
-        pooled_output = torch.mean(attended_output, dim=1)
+        # Apply dropout
+        x = self.dropout_layer(x)
         
-        # Pass through output layer (2 neurons for frequency and magnitude)
-        output = self.output_layer(pooled_output)
+        # Final output layer
+        x = self.output_layer(x)
         
-        # Apply sigmoid activation as per the paper
-        output = torch.sigmoid(output)
-        return output
-    
-    def forward_with_attention(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass that also returns attention weights for analysis.
-        
-        Args:
-            x: Input tensor
-            
-        Returns:
-            Tuple of (output, attention_weights)
-        """
-        batch_size, seq_len, _ = x.size()
-        
-        # LSTM layers
-        lstm1_out, (h1, c1) = self.lstm1(x)
-        lstm1_out = self.dropout1(lstm1_out)
-        
-        lstm2_out, (h2, c2) = self.lstm2(lstm1_out)
-        lstm2_out = self.dropout2(lstm2_out)
-        
-        lstm3_out, (h3, c3) = self.lstm3(lstm2_out)
-        lstm3_out = self.dropout3(lstm3_out)
-        
-        lstm4_out, (h4, c4) = self.lstm4(lstm3_out)
-        lstm4_out = self.dropout4(lstm4_out)
-        
-        # Attention mechanism
-        attended_output, attention_weights = self.attention(
-            query=lstm4_out,
-            key=lstm4_out,
-            value=lstm4_out
-        )
-        
-        # Project attention output
-        attended_output = self.attention_projection(attended_output)
-        
-        # Global average pooling
-        pooled_output = torch.mean(attended_output, dim=1)
-        
-        # Output layer
-        output = self.output_layer(pooled_output)
-        # Apply sigmoid activation as per the paper
-        output = torch.sigmoid(output)
-        
-        return output, attention_weights
-    
-    def get_hidden_states(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
-        """
-        Get hidden states from all LSTM layers for analysis.
-        
-        Args:
-            x: Input tensor
-            
-        Returns:
-            Tuple of hidden states from each LSTM layer
-        """
-        batch_size, seq_len, _ = x.size()
-        
-        # LSTM Layer 1
-        lstm1_out, (h1, c1) = self.lstm1(x)
-        lstm1_out = self.dropout1(lstm1_out)
-        
-        # LSTM Layer 2
-        lstm2_out, (h2, c2) = self.lstm2(lstm1_out)
-        lstm2_out = self.dropout2(lstm2_out)
-        
-        # LSTM Layer 3
-        lstm3_out, (h3, c3) = self.lstm3(lstm2_out)
-        lstm3_out = self.dropout3(lstm3_out)
-        
-        # LSTM Layer 4
-        lstm4_out, (h4, c4) = self.lstm4(lstm3_out)
-        lstm4_out = self.dropout4(lstm4_out)
-        
-        return (lstm1_out, lstm2_out, lstm3_out, lstm4_out), (h1, h2, h3, h4), (c1, c2, c3, c4)
-    
-    def count_parameters(self) -> int:
-        """Count total number of trainable parameters."""
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
-    
-    def get_model_info(self) -> dict:
-        """Get model architecture information."""
-        return {
-            'model_type': 'AttentionLSTM',
-            'input_size': self.input_size,
-            'hidden_sizes': self.hidden_sizes,
-            'bidirectional': self.bidirectional,
-            'dropout': self.dropout,
-            'total_parameters': self.count_parameters(),
-            'architecture': {
-                'lstm1': f"LSTM({self.input_size}, {self.hidden_sizes[0]})",
-                'lstm2': f"LSTM({self.hidden_sizes[0] * self.num_directions}, {self.hidden_sizes[1]})",
-                'lstm3': f"LSTM({self.hidden_sizes[1] * self.num_directions}, {self.hidden_sizes[2]})",
-                'lstm4': f"LSTM({self.hidden_sizes[2] * self.num_directions}, {self.hidden_sizes[3]})",
-                'attention': f"MultiheadAttention({self.embed_dim}, {self.num_heads} heads)",
-                'output': f"Linear({self.embed_dim}, 2) for frequency and magnitude"
-            }
-        }
+        return x

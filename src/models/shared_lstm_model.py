@@ -3,10 +3,10 @@
 Shared LSTM Model for Earthquake Forecasting
 
 Implements a single shared LSTM model across all quadtree bins with:
-- Dual output heads: max magnitude (continuous) and frequency (Poisson log-rate)
+- Dual output heads: max magnitude (continuous) and frequency (log-frequency)
 - LSTM(64, return_sequences=True) → LSTM(32, return_sequences=False)
 - Concatenation with bin metadata features
-- Weighted loss combining MSE (magnitude) and Poisson NLL (frequency)
+- Weighted loss combining MSE (magnitude) and MSE (log-frequency)
 """
 
 import torch
@@ -27,9 +27,10 @@ class SharedLSTMModel(nn.Module):
                  metadata_features: int,
                  lookback_years: int = 10,
                  lstm_hidden_1: int = 64,
-                 lstm_hidden_2: int = 32,
+                 lstm_hidden_2: int = 64,
                  dense_hidden: int = 32,
-                 dropout_rate: float = 0.25):
+                 dropout_rate: float = 0.25,
+                 freq_head_type: str = "linear"):
         super(SharedLSTMModel, self).__init__()
         
         self.input_seq_features = input_seq_features
@@ -39,6 +40,7 @@ class SharedLSTMModel(nn.Module):
         self.lstm_hidden_2 = lstm_hidden_2
         self.dense_hidden = dense_hidden
         self.dropout_rate = dropout_rate
+        self.freq_head_type = freq_head_type
         
         # LSTM layers for sequential features
         self.lstm1 = nn.LSTM(
@@ -56,36 +58,86 @@ class SharedLSTMModel(nn.Module):
         # Feature concatenation layer
         combined_features = lstm_hidden_2 + metadata_features
         
-        # Dense layers after concatenation with enhanced dropout and normalization
+        # Dense layers after concatenation
         self.dense1 = nn.Linear(combined_features, dense_hidden)
-        self.bn1 = nn.BatchNorm1d(dense_hidden)  # 🔧 FIX: Add batch normalization
-        self.dropout1 = nn.Dropout(dropout_rate * 1.5)  # 🔧 FIX: Increase dropout
+        self.bn1 = nn.BatchNorm1d(dense_hidden)
+        self.dropout1 = nn.Dropout(dropout_rate)
         
-        # Dual output heads with enhanced regularization
-        # Magnitude head (continuous, linear activation) - UNCHANGED
+        # [REFACTOR] Deeper MLP funnel for output heads (120 -> 90 -> 30 -> 30 -> 1)
+        # Magnitude head: deeper MLP funnel with Linear output (no activation)
         self.magnitude_head = nn.Sequential(
-            nn.Linear(dense_hidden, 16),
+            nn.Linear(dense_hidden, 120),
             nn.ReLU(),
-            nn.Dropout(dropout_rate * 0.8),  # 🔧 FIX: Increase dropout for output
-            nn.Linear(16, 1)
+            nn.Dropout(dropout_rate * 0.5),
+            nn.Linear(120, 90),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.3),
+            nn.Linear(90, 30),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.2),
+            nn.Linear(30, 30),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.1),
+            nn.Linear(30, 1)  # No activation for magnitude
         )
         
-        # FREQUENCY HEAD: UPDATED TO LOG1P + MSE FORMULATION
-        # Output: log(λ) where λ is the Poisson rate parameter
-        # For inference: expected counts = exp(log(λ)) = λ
-        self.frequency_head = nn.Sequential(
-            nn.Linear(dense_hidden, 16),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate * 0.8),  # 🔧 FIX: Increase dropout for output
-            nn.Linear(16, 1)  # Linear activation for log-rate output
-        )
+        # [REFACTOR] Frequency head: enhanced architecture with light hidden layer
+        if freq_head_type == "linear":
+            # Enhanced frequency head: light hidden layer for better expressiveness
+            self.frequency_head = nn.Sequential(
+                nn.Linear(dense_hidden, 120),
+                nn.ReLU(),
+                nn.Dropout(dropout_rate * 0.5),
+                nn.Linear(120, 90),
+                nn.ReLU(),
+                nn.Dropout(dropout_rate * 0.3),
+                nn.Linear(90, 30),
+                nn.ReLU(),
+                nn.Dropout(dropout_rate * 0.2),
+                nn.Linear(30, 8),  # 🔧 NEW: Light hidden layer
+                nn.ReLU(),
+                nn.Linear(8, 1)    # 🔧 NEW: Output layer
+            )
+            # No learnable scaling parameters for linear mode
+            self.frequency_scale = None
+            self.frequency_bias = None
+        else:
+            # Legacy scaled mode (kept for comparison)
+            self.frequency_head = nn.Sequential(
+                nn.Linear(dense_hidden, 120),
+                nn.ReLU(),
+                nn.Dropout(dropout_rate * 0.5),
+                nn.Linear(120, 90),
+                nn.ReLU(),
+                nn.Dropout(dropout_rate * 0.3),
+                nn.Linear(90, 60),  # Added intermediate layer
+                nn.ReLU(),
+                nn.Dropout(dropout_rate * 0.2),
+                nn.Linear(60, 30),
+                nn.ReLU(),
+                nn.Dropout(dropout_rate * 0.1),
+                nn.Linear(30, 1),
+                nn.Identity()  # No activation - let the model learn the full range
+            )
+            # Learnable scaling parameters for scaled mode
+            self.frequency_scale = nn.Parameter(torch.tensor(1.0))
+            self.frequency_bias = nn.Parameter(torch.tensor(0.0))
         
         # Initialize weights
         self._init_weights()
         
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"SharedLSTMModel initialized with {sum(p.numel() for p in self.parameters())} parameters")
-        self.logger.info("Frequency head updated to Poisson formulation (log-rate output)")
+        self.logger.info(f"[REFACTORING] Frequency head type: {freq_head_type}")
+        if freq_head_type == "linear":
+            self.logger.info("  - Linear frequency head: direct log-frequency prediction")
+            self.logger.info("  - No learnable scaling parameters")
+            self.logger.info("  - Stable regression in log-space")
+        else:
+            self.logger.info("  - Scaled frequency head: learnable scaling parameters")
+            self.logger.info("  - Legacy mode for comparison")
+        self.logger.info("  - Magnitude head: Linear output (no activation)")
+        self.logger.info("  - Deeper MLP funnel: 120 -> 90 -> 30 -> 30 -> 1")
     
     def _init_weights(self):
         """Initialize model weights using Xavier initialization."""
@@ -112,9 +164,9 @@ class SharedLSTMModel(nn.Module):
             metadata: Bin metadata tensor of shape (batch_size, metadata_features)
             
         Returns:
-            Tuple of (magnitude_pred, frequency_log_rate_pred)
+            Tuple of (magnitude_pred, frequency_pred)
             - magnitude_pred: continuous magnitude prediction
-            - frequency_log_rate_pred: log of Poisson rate parameter (log(λ))
+            - frequency_pred: log-frequency prediction (raw linear output)
         """
         # LSTM processing
         lstm_out, _ = self.lstm1(input_sequence)
@@ -128,104 +180,101 @@ class SharedLSTMModel(nn.Module):
         
         # Dense layers
         dense_out = self.dense1(combined)
-        dense_out = self.bn1(dense_out)  # 🔧 FIX: Apply batch normalization
+        dense_out = self.bn1(dense_out)
         dense_out = F.relu(dense_out)
         dense_out = self.dropout1(dense_out)
         
         # Dual output heads
         magnitude_pred = self.magnitude_head(dense_out)
-        frequency_log_rate_pred = self.frequency_head(dense_out)  # log(λ)
+        frequency_pred = self.frequency_head(dense_out)  # Raw output (no activation)
         
-        return magnitude_pred, frequency_log_rate_pred
+        # Apply scaling based on head type
+        if self.freq_head_type == "scaled" and self.frequency_scale is not None:
+            # Legacy scaled mode
+            frequency_pred = self.frequency_scale * frequency_pred + self.frequency_bias
+            frequency_pred = F.softplus(frequency_pred) + 1e-6  # Softplus for positivity
+        # For linear mode, return raw output directly (log-frequency)
+        
+        return magnitude_pred, frequency_pred
     
-    def predict_frequency_counts(self, frequency_log_rate_pred: torch.Tensor) -> torch.Tensor:
+    def predict_frequency_counts(self, frequency_pred: torch.Tensor) -> torch.Tensor:
         """
-        Convert log-rate predictions to expected count predictions.
+        Convert frequency predictions to expected count predictions.
         
         Args:
-            frequency_log_rate_pred: log(λ) predictions
+            frequency_pred: frequency predictions (log-frequency for linear mode, log1p for scaled mode)
             
         Returns:
-            Expected count predictions: exp(log(λ)) = λ
+            Expected count predictions converted to raw counts
         """
-        return torch.exp(frequency_log_rate_pred)
+        if self.freq_head_type == "linear":
+            # frequency_pred is log(λ), so λ = exp(frequency_pred)
+            raw_counts = torch.exp(frequency_pred)
+        else:
+            # Legacy mode: frequency_pred is log(1 + λ), so λ = expm1(frequency_pred)
+            raw_counts = torch.expm1(frequency_pred)
+        
+        # Add small epsilon to prevent zero values
+        return raw_counts + 1e-6
 
 
 class WeightedEarthquakeLoss(nn.Module):
     """
-    Custom loss function combining MSE for magnitude and log1p + MSE for frequency.
+    Custom loss function combining MSE for magnitude and MSE for frequency.
     
-    🔧 IMPROVEMENT: Added configurable weights α, β, γ and optional correlation penalty.
-    Total Loss = α*MSE + β*log1p_MSE - γ*PearsonCorrelation
+    🔧 REFACTOR: Updated to use rebalanced weights and direct log-frequency comparison.
+    Total Loss = alpha*MSE + beta*MSE (frequency targets preprocessed with log1p)
     """
     
     def __init__(self, 
-                 magnitude_weight: float = 1.0,      # α: weight for magnitude loss
-                 frequency_weight: float = 4.0,      # β: weight for frequency loss
-                 correlation_weight: float = 0.0,    # γ: weight for correlation penalty (default: disabled)
-                 dynamic_beta: bool = True):         # Enable dynamic β adjustment
+                 magnitude_weight: float = 2.0,      # alpha: weight for magnitude loss (increased)
+                 frequency_weight: float = 1.0,      # beta: weight for frequency loss (increased from 0.5)
+                 correlation_weight: float = 0.0,    # gamma: weight for correlation penalty (disabled)
+                 dynamic_beta: bool = False):        # Disable dynamic beta adjustment
         super(WeightedEarthquakeLoss, self).__init__()
         
-        self.magnitude_weight = magnitude_weight      # α
-        self.base_frequency_weight = frequency_weight # Base β value
-        self.frequency_weight = frequency_weight      # Current β value (can be adjusted)
-        self.correlation_weight = correlation_weight  # γ
-        self.dynamic_beta = dynamic_beta              # Enable dynamic β
-        self.epoch_count = 0                         # Track epochs for dynamic adjustment
+        self.magnitude_weight = magnitude_weight      # alpha
+        self.frequency_weight = frequency_weight      # beta
+        self.correlation_weight = correlation_weight  # gamma
+        self.dynamic_beta = dynamic_beta              # Disabled
         
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"WeightedEarthquakeLoss: alpha(magnitude)={magnitude_weight}, beta(frequency)={frequency_weight}, gamma(correlation)={correlation_weight}")
-        self.logger.info("Frequency loss updated to use log1p + MSE for better stability")
-        if self.dynamic_beta:
-            self.logger.info("Dynamic β enabled: β will adjust based on training progress")
-        if correlation_weight > 0:
-            self.logger.info("Correlation penalty enabled: Total Loss = alpha*MSE + beta*log1p_MSE - gamma*Correlation")
+        self.logger.info("[REFACTORING] APPLIED:")
+        self.logger.info("  - Rebalanced loss weights: alpha=2.0, beta=1.0, gamma=0.0")
+        self.logger.info("  - Frequency targets preprocessed with log1p")
+        self.logger.info("  - Direct MSE comparison in log-space")
+        self.logger.info("  - Total Loss = alpha*MSE + beta*MSE (log1p frequency)")
     
     def forward(self, 
                 magnitude_pred: torch.Tensor, 
-                frequency_log_rate_pred: torch.Tensor,
+                frequency_pred: torch.Tensor,
                 magnitude_true: torch.Tensor, 
                 frequency_true: torch.Tensor) -> torch.Tensor:
         """
-        Compute the weighted loss with optional correlation penalty.
+        Compute the weighted loss with log1p preprocessing for frequency.
         
         Args:
             magnitude_pred: magnitude predictions
-            frequency_log_rate_pred: log(λ) predictions (Poisson log-rate)
+            frequency_pred: frequency predictions (log-frequency for linear mode)
             magnitude_true: true magnitude values
             frequency_true: true frequency counts
         """
-        # Magnitude loss (MSE) - UNCHANGED
+        # Magnitude loss (MSE)
         magnitude_loss = F.mse_loss(magnitude_pred, magnitude_true)
         
-        # 🔧 IMPROVEMENT: Apply log-transform to frequency targets (log1p) for better scaling
-        # This ensures both trend and scale are learned properly
-        frequency_true_log = torch.log1p(frequency_true)  # log(1 + frequency)
+        # 🔧 REFACTOR: Preprocess frequency targets with log1p and train directly on that scale
+        frequency_true_log1p = torch.log1p(frequency_true)  # log(1 + frequency)
         
-        # FREQUENCY LOSS: UPDATED TO LOG1P + MSE for better stability
-        # 🔧 FIX: Add clipping to prevent extreme values
-        frequency_log_rate_clipped = torch.clamp(frequency_log_rate_pred, -10, 10)  # Prevent extreme log values
+        # 🔧 FIX: frequency_pred is already in log-space, compare directly
+        # No need to convert frequency_pred back to log1p space
         
-        # Convert predictions to log1p space for comparison
-        frequency_pred_log = torch.log1p(torch.exp(frequency_log_rate_clipped))  # log(1 + exp(log(λ)))
+        # Frequency loss: MSE on log1p scale
+        frequency_loss = F.mse_loss(frequency_pred, frequency_true_log1p)
         
-        # MSE loss in log1p space
-        frequency_loss = F.mse_loss(frequency_pred_log, frequency_true_log)
-        
-        # 🔧 IMPROVEMENT: Calculate correlation penalty if enabled
-        correlation_penalty = 0.0
-        if self.correlation_weight > 0:
-            # Calculate Pearson correlation for both outputs
-            mag_corr = self._pearson_correlation(magnitude_pred, magnitude_true)
-            freq_corr = self._pearson_correlation(frequency_log_rate_pred, frequency_true)
-            
-            # Use average correlation as penalty
-            correlation_penalty = (mag_corr + freq_corr) / 2.0
-        
-        # 🔧 IMPROVEMENT: Weighted combination with configurable weights (α, β, γ)
+        # 🔧 REFACTOR: Weighted combination with rebalanced weights
         total_loss = (self.magnitude_weight * magnitude_loss + 
-                     self.frequency_weight * frequency_loss - 
-                     self.correlation_weight * correlation_penalty)
+                     self.frequency_weight * frequency_loss)
         
         return total_loss
     
@@ -252,67 +301,23 @@ class WeightedEarthquakeLoss(nn.Module):
         correlation = numerator / denominator
         return correlation
     
-    def update_beta(self, epoch: int, val_loss: float = None):
-        """
-        Dynamically adjust β weight based on training progress.
-        
-        Args:
-            epoch: Current epoch number
-            val_loss: Validation loss for adaptive adjustment
-        """
-        if not self.dynamic_beta:
-            return
-        
-        self.epoch_count = epoch
-        
-        # Strategy 1: Gradual increase in early training
-        if epoch < 10:
-            # Start with lower β, gradually increase
-            self.frequency_weight = self.base_frequency_weight * (0.5 + 0.5 * epoch / 10)
-        
-        # Strategy 2: Adaptive adjustment based on validation loss
-        elif val_loss is not None and epoch > 10:
-            # If validation loss is high, increase β to focus on frequency
-            if val_loss > 1.0:
-                self.frequency_weight = min(self.base_frequency_weight * 1.5, 10.0)
-            else:
-                # Gradually return to base value
-                self.frequency_weight = max(self.base_frequency_weight, 
-                                         self.frequency_weight * 0.95)
-        
-        # Strategy 3: Final convergence
-        if epoch > 30:
-            # Stabilize β near base value
-            self.frequency_weight = self.base_frequency_weight
-    
     def get_loss_components(self, 
                            magnitude_pred: torch.Tensor, 
-                           frequency_log_rate_pred: torch.Tensor,
+                           frequency_pred: torch.Tensor,
                            magnitude_true: torch.Tensor, 
                            frequency_true: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Get individual loss components for monitoring."""
-        # Magnitude loss (MSE) - UNCHANGED
+        # Magnitude loss (MSE)
         magnitude_loss = F.mse_loss(magnitude_pred, magnitude_true)
         
-        # 🔧 IMPROVEMENT: Apply log-transform to frequency targets for consistency
-        frequency_true_log = torch.log1p(frequency_true)  # log(1 + frequency)
-        
-        # Frequency loss (log1p + MSE) - UPDATED for better stability
-        frequency_pred_log = torch.log1p(torch.exp(frequency_log_rate_pred))  # log(1 + exp(log(λ)))
-        frequency_loss = F.mse_loss(frequency_pred_log, frequency_true_log)
-        
-        # 🔧 IMPROVEMENT: Calculate correlation penalty if enabled
-        correlation_penalty = 0.0
-        if self.correlation_weight > 0:
-            mag_corr = self._pearson_correlation(magnitude_pred, magnitude_true)
-            freq_corr = self._pearson_correlation(frequency_log_rate_pred, frequency_true)
-            correlation_penalty = (mag_corr + freq_corr) / 2.0
+        # Frequency loss: MSE on log1p scale
+        frequency_true_log1p = torch.log1p(frequency_true)
+        frequency_loss = F.mse_loss(frequency_pred, frequency_true_log1p)
         
         return {
             'magnitude_loss': magnitude_loss,
             'frequency_loss': frequency_loss,
-            'correlation_penalty': correlation_penalty,
+            'correlation_penalty': torch.tensor(0.0, device=magnitude_pred.device),
             'total_loss': (self.magnitude_weight * magnitude_loss + 
-                          self.frequency_weight * frequency_loss - 
-                          self.correlation_weight * correlation_penalty)
+                          self.frequency_weight * frequency_loss)
         }

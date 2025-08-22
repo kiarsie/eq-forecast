@@ -24,13 +24,9 @@ from typing import Dict, List, Tuple, Optional
 import os
 from datetime import datetime
 
-# Add src to path for imports
-import sys
-sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
-
-from src.models.simple_lstm import SimpleLSTM
-from src.models.attention_lstm import AttentionLSTM
-from src.models.quadtree_data_loader import QuadtreeDataLoader
+from .simple_lstm import SimpleLSTM
+from .attention_lstm import AttentionLSTM
+from .quadtree_data_loader import QuadtreeDataLoader
 
 
 class QuadtreeModelTrainer:
