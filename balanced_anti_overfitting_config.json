@@ -1,0 +1,58 @@
+{
+  "name": "Balanced Anti-Overfitting Configuration",
+  "description": "Balanced configuration that prevents overfitting while maintaining reasonable model capacity",
+  "version": "1.0",
+  "model_architecture": {
+    "input_seq_features": 10,
+    "metadata_features": 5,
+    "lookback_years": 10,
+    "lstm_hidden_1": 48,
+    "lstm_hidden_2": 32,
+    "dense_hidden": 24,
+    "dropout_rate": 0.3,
+    "freq_head_type": "linear"
+  },
+  "training_parameters": {
+    "learning_rate": 0.0005,
+    "weight_decay": 0.0005,
+    "num_epochs": 100,
+    "patience": 12,
+    "batch_size": 24,
+    "gradient_clip": 0.5,
+    "scheduler_T0": 15,
+    "scheduler_T_mult": 2
+  },
+  "loss_weights": {
+    "magnitude_weight": 1.0,
+    "frequency_weight": 1.0,
+    "correlation_weight": 0.0
+  },
+  "frequency_scaling": {
+    "frequency_scale_init": 8.0,
+    "frequency_bias_init": 1.5,
+    "scaling_lr_multiplier": 15,
+    "scaling_wd_multiplier": 1.5
+  },
+  "anti_overfitting_features": {
+    "early_stopping": true,
+    "learning_rate_scheduling": true,
+    "gradient_clipping": true,
+    "moderate_model_complexity": true,
+    "moderate_dropout": true,
+    "moderate_weight_decay": true,
+    "balanced_batch_size": true,
+    "reasonable_training_epochs": true
+  },
+  "expected_behavior": {
+    "frequency_accuracy_target": "70-85% (realistic, not overfitted)",
+    "magnitude_accuracy_target": "75-90% (realistic, not overfitted)",
+    "prediction_range_target": "85-95% of target range",
+    "overfitting_indicators": "Should NOT see 100% accuracy but should see reasonable range coverage"
+  },
+  "usage_notes": [
+    "Use with: --optimized_config balanced_anti_overfitting",
+    "This configuration balances generalization with model capacity",
+    "Expect realistic but competitive performance metrics",
+    "Models trained with this config will be trustworthy and capable"
+  ]
+}

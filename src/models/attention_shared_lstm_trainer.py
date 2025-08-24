@@ -17,10 +17,10 @@ class AttentionSharedLSTMTrainer(SharedLSTMTrainer):
                  train_loader,
                  val_loader,
                  test_loader,
-                 learning_rate: float = 1e-3,  # ATTENTION MODEL: Higher base LR to overcome attention dominance
+                 learning_rate: float = 5e-4,
                  weight_decay: float = 1e-4,
                  magnitude_weight: float = 2.0,
-                 frequency_weight: float = 0.5,
+                 frequency_weight: float = 1.0,  # FIXED: Changed from 0.5 to 1.0 for consistency
                  correlation_weight: float = 0.0,
                  device: str = 'auto',
                  save_dir: str = None):

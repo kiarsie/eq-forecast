@@ -281,7 +281,7 @@ class QuadtreeModelTrainer:
     def train_bin_models(self, 
                          bin_id: int, 
                          num_epochs: int = 100, 
-                         patience: int = 20) -> Dict:
+                         patience: int = 15) -> Dict:  # FIXED: Changed from 20 to 15 for consistency
         """
         Train both Simple LSTM and Attention LSTM for a specific bin.
         
@@ -815,7 +815,7 @@ class QuadtreeModelTrainer:
         
         self.logger.info(f"Saved models for bin {bin_id}")
     
-    def train_all_bins(self, num_epochs: int = 100, patience: int = 20) -> Dict:
+    def train_all_bins(self, num_epochs: int = 100, patience: int = 15) -> Dict:  # FIXED: Changed from 20 to 15 for consistency
         """
         Train models for all quadtree bins.
         

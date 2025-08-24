@@ -47,6 +47,68 @@ from src.models.attention_shared_lstm_trainer import AttentionSharedLSTMTrainer
 from src.models.enhanced_shared_processor import EnhancedSharedDataset
 from src.models.model_comparison_trainer import ModelComparisonTrainer
 
+# Import optimized configuration utilities
+try:
+    from apply_optimized_configs import load_config, create_optimized_model, get_training_params, get_all_training_params
+    OPTIMIZED_CONFIGS_AVAILABLE = True
+except ImportError:
+    OPTIMIZED_CONFIGS_AVAILABLE = False
+    print("⚠️  Optimized configs not available. Install apply_optimized_configs.py for best performance.")
+
+
+def load_optimized_config(config_name: str = "best_frequency") -> Optional[Dict]:
+    """
+    Load an optimized hyperparameter configuration.
+    
+    Args:
+        config_name: Name of the configuration to load
+            - "best_frequency": Best frequency prediction (49.39 range)
+            - "best_magnitude": Best magnitude prediction (1.52 range)  
+            - "best_balanced": Best balanced performance (25.9 combined score)
+            - "anti_overfitting": Prevents overfitting with aggressive regularization
+            - "balanced_anti_overfitting": Balanced performance and capacity
+            - "enhanced_frequency_scaling": Maximum range coverage
+            - "high_performance_balanced": Maximum overall performance
+    
+    Returns:
+        Configuration dictionary or None if not available
+    """
+    if not OPTIMIZED_CONFIGS_AVAILABLE:
+        return None
+    
+    config_files = {
+        "best_frequency": "best_frequency_config.json",
+        "best_magnitude": "best_magnitude_config.json", 
+        "best_balanced": "best_balanced_config.json",
+        "anti_overfitting": "anti_overfitting_config.json",
+        "balanced_anti_overfitting": "balanced_anti_overfitting_config.json",
+        "enhanced_frequency_scaling": "enhanced_frequency_scaling_config.json",
+        "high_performance_balanced": "high_performance_balanced_config.json"
+    }
+    
+    if config_name not in config_files:
+        print(f"Unknown config: {config_name}")
+        print(f"Available: {list(config_files.keys())}")
+        return None
+    
+    try:
+        config = load_config(config_files[config_name])
+        print(f"Loaded {config['name']} configuration:")
+        
+        # Handle different config formats
+        if 'performance' in config:
+            print(f"   Frequency range: {config['performance']['frequency_range']:.2f}")
+            print(f"   Magnitude range: {config['performance']['magnitude_range']:.2f}")
+        elif 'anti_overfitting_features' in config:
+            print(f"   Type: Anti-overfitting configuration")
+            print(f"   Dropout: {config['model_architecture']['dropout_rate']}")
+            print(f"   Weight decay: {config['training_parameters']['weight_decay']}")
+            print(f"   Expected: Realistic performance (60-80% accuracy)")
+        return config
+    except Exception as e:
+        print(f"Failed to load {config_name}: {e}")
+        return None
+
 
 def setup_logging(log_level: str = "INFO", log_file: str = None) -> logging.Logger:
     """Setup logging configuration."""
@@ -448,10 +510,10 @@ def train_attention_shared_lstm_model(model: AttentionSharedLSTMModel,
                                       save_dir: str,
                                       logger: logging.Logger,
                                       num_epochs: int = 300,
-                                      learning_rate: float = 1e-3,
+                                      learning_rate: float = 5e-4,  # FIXED: Match successful training (5e-4)
                                       weight_decay: float = 1e-4,
-                                      magnitude_weight: float = 1.0,
-                                      frequency_weight: float = 4.0,
+                                      magnitude_weight: float = 2.0,  # FIXED: Match successful training (2.0)
+                                      frequency_weight: float = 1.0,  # FIXED: Match successful training (1.0)
                                       correlation_weight: float = 0.0) -> Dict:
     """
     Train the attention shared LSTM model.
@@ -686,7 +748,7 @@ def evaluate_shared_lstm_model(model_path: str,
         logger.info(f"Frequency MAE: {test_metrics['frequency_mae']:.4f}")
         logger.info(f"Magnitude Correlation: {test_metrics['magnitude_corr']:.4f}")
         logger.info(f"Frequency Correlation: {test_metrics['frequency_corr']:.4f}")
-        logger.info(f"Magnitude Accuracy (±0.5): {test_metrics['magnitude_accuracy']:.3f}")
+        logger.info(f"Magnitude Accuracy (±0.3): {test_metrics['magnitude_accuracy']:.3f}")
         logger.info(f"Frequency Accuracy (±1): {test_metrics['frequency_accuracy']:.3f}")
         
         return test_metrics
@@ -918,11 +980,11 @@ def run_model_comparison(datasets: Dict,
                          save_dir: str,
                          logger: logging.Logger,
                          num_epochs: int = 300,
-                         patience: int = 12,
+                         patience: int = 15,  # FIXED: Changed from 12 to 15 for consistency
                          learning_rate: float = 5e-4,
                          weight_decay: float = 1e-4,
                          magnitude_weight: float = 2.0,
-                         frequency_weight: float = 0.5,
+                         frequency_weight: float = 1.0,  # FIXED: Changed from 0.5 to 1.0 for consistency
                          correlation_weight: float = 0.0) -> Dict:
     """
     Run comparison between Simple LSTM and Attention LSTM models.
@@ -1272,6 +1334,13 @@ def main():
         choices=['simple', 'attention', 'compare'],
         help='Which model to train: simple (SharedLSTM), attention (AttentionSharedLSTM), or compare (both).'
     )
+    parser.add_argument(
+        '--optimized_config',
+        type=str,
+        default=None,
+        choices=['best_frequency', 'best_magnitude', 'best_balanced', 'anti_overfitting', 'balanced_anti_overfitting', 'enhanced_frequency_scaling', 'high_performance_balanced'],
+        help='Use optimized hyperparameter configuration for best performance. Options: best_frequency (49.39 range), best_magnitude (1.52 range), best_balanced (balanced performance), anti_overfitting (prevents overfitting), balanced_anti_overfitting (balanced performance and capacity), enhanced_frequency_scaling (maximum range coverage), high_performance_balanced (maximum overall performance)'
+    )
     
     args = parser.parse_args()
     
@@ -1346,96 +1415,308 @@ def main():
             
             if args.model == "simple":
                 logger.info("Training Simple Shared LSTM Model")
-                model = create_shared_lstm_model(
-                    input_features=datasets['input_features'],
-                    metadata_features=datasets['metadata_features'],
-                    lookback_years=args.lookback_years,
-                    logger=logger
-                )
                 
-                training_results = train_shared_lstm_model(
-                    model=model,
-                    train_loader=datasets['train_loader'],
-                    val_loader=datasets['val_loader'],
-                    test_loader=datasets['test_loader'],
-                    save_dir=str(results_dir),
-                    logger=logger,
-                    num_epochs=args.num_epochs,
-                    learning_rate=args.learning_rate,
-                    weight_decay=args.weight_decay,
-                    magnitude_weight=args.magnitude_weight,
-                    frequency_weight=args.frequency_weight,
-                    correlation_weight=args.correlation_weight
-                )
+                # Check if using optimized configuration
+                if args.optimized_config and OPTIMIZED_CONFIGS_AVAILABLE:
+                    logger.info(f"Using optimized configuration: {args.optimized_config}")
+                    config = load_optimized_config(args.optimized_config)
+                    if config:
+                        # Create model with optimized parameters
+                        model = create_optimized_model(
+                            SharedLSTMModel, 
+                            config,
+                            input_features=datasets['input_features'],
+                            metadata_features=datasets['metadata_features'],
+                            lookback_years=args.lookback_years,
+                            logger=logger
+                        )
+                        
+                        # Get training parameters from config
+                        train_params = get_all_training_params(config)
+                        logger.info(f"Using optimized training parameters:")
+                        for key, value in train_params.items():
+                            logger.info(f"   {key}: {value}")
+                        
+                        training_results = train_shared_lstm_model(
+                            model=model,
+                            train_loader=datasets['train_loader'],
+                            val_loader=datasets['val_loader'],
+                            test_loader=datasets['test_loader'],
+                            save_dir=str(results_dir),
+                            logger=logger,
+                            **train_params
+                        )
+                    else:
+                        logger.warning("⚠️  Failed to load optimized config, using default parameters")
+                        model = create_shared_lstm_model(
+                            input_features=datasets['input_features'],
+                            metadata_features=datasets['metadata_features'],
+                            lookback_years=args.lookback_years,
+                            logger=logger
+                        )
+                        
+                        training_results = train_shared_lstm_model(
+                            model=model,
+                            train_loader=datasets['train_loader'],
+                            val_loader=datasets['val_loader'],
+                            test_loader=datasets['test_loader'],
+                            save_dir=str(results_dir),
+                            logger=logger,
+                            learning_rate=args.learning_rate,
+                            weight_decay=args.weight_decay,
+                            magnitude_weight=args.magnitude_weight,
+                            frequency_weight=args.frequency_weight,
+                            correlation_weight=args.correlation_weight
+                        )
+                else:
+                    # Use default parameters
+                    model = create_shared_lstm_model(
+                        input_features=datasets['input_features'],
+                        metadata_features=datasets['metadata_features'],
+                        lookback_years=args.lookback_years,
+                        logger=logger
+                    )
+                    
+                    training_results = train_shared_lstm_model(
+                        model=model,
+                        train_loader=datasets['train_loader'],
+                        val_loader=datasets['val_loader'],
+                        test_loader=datasets['test_loader'],
+                        save_dir=str(results_dir),
+                        logger=logger,
+                        learning_rate=args.learning_rate,
+                        weight_decay=args.weight_decay,
+                        magnitude_weight=args.magnitude_weight,
+                        frequency_weight=args.frequency_weight,
+                        correlation_weight=args.correlation_weight
+                    )
                 
             elif args.model == "attention":
                 logger.info("Training Attention Shared LSTM Model")
-                model = create_attention_shared_lstm_model(
-                    input_features=datasets['input_features'],
-                    metadata_features=datasets['metadata_features'],
-                    lookback_years=args.lookback_years,
-                    logger=logger
-                )
                 
-                training_results = train_attention_shared_lstm_model(
-                    model=model,
-                    train_loader=datasets['train_loader'],
-                    val_loader=datasets['val_loader'],
-                    test_loader=datasets['test_loader'],
-                    save_dir=str(results_dir),
-                    logger=logger,
-                    num_epochs=args.num_epochs,
-                    learning_rate=args.learning_rate,
-                    weight_decay=args.weight_decay,
-                    magnitude_weight=args.magnitude_weight,
-                    frequency_weight=args.frequency_weight,
-                    correlation_weight=args.correlation_weight
-                )
+                # Check if using optimized configuration
+                if args.optimized_config and OPTIMIZED_CONFIGS_AVAILABLE:
+                    logger.info(f"Using optimized configuration: {args.optimized_config}")
+                    config = load_optimized_config(args.optimized_config)
+                    if config:
+                        # Create model with optimized parameters
+                        model = create_optimized_model(
+                            AttentionSharedLSTMModel, 
+                            config,
+                            input_features=datasets['input_features'],
+                            metadata_features=datasets['metadata_features'],
+                            lookback_years=args.lookback_years,
+                            logger=logger
+                        )
+                        
+                        # Get training parameters from config
+                        train_params = get_all_training_params(config)
+                        logger.info(f"Using optimized training parameters:")
+                        for key, value in train_params.items():
+                            logger.info(f"   {key}: {value}")
+                        
+                        training_results = train_attention_shared_lstm_model(
+                            model=model,
+                            train_loader=datasets['train_loader'],
+                            val_loader=datasets['val_loader'],
+                            test_loader=datasets['test_loader'],
+                            save_dir=str(results_dir),
+                            logger=logger,
+                            **train_params
+                        )
+                    else:
+                        logger.warning("⚠️  Failed to load optimized config, using default parameters")
+                        model = create_attention_shared_lstm_model(
+                            input_features=datasets['input_features'],
+                            metadata_features=datasets['metadata_features'],
+                            lookback_years=args.lookback_years,
+                            logger=logger
+                        )
+                        
+                        training_results = train_attention_shared_lstm_model(
+                            model=model,
+                            train_loader=datasets['train_loader'],
+                            val_loader=datasets['val_loader'],
+                            test_loader=datasets['test_loader'],
+                            save_dir=str(results_dir),
+                            logger=logger,
+                            learning_rate=args.learning_rate,
+                            weight_decay=args.weight_decay,
+                            magnitude_weight=args.magnitude_weight,
+                            frequency_weight=args.frequency_weight,
+                            correlation_weight=args.correlation_weight
+                        )
+                else:
+                    # Use default parameters
+                    model = create_attention_shared_lstm_model(
+                        input_features=datasets['input_features'],
+                        metadata_features=datasets['metadata_features'],
+                        lookback_years=args.lookback_years,
+                        logger=logger
+                    )
+                    
+                    training_results = train_attention_shared_lstm_model(
+                        model=model,
+                        train_loader=datasets['train_loader'],
+                        val_loader=datasets['val_loader'],
+                        test_loader=datasets['test_loader'],
+                        save_dir=str(results_dir),
+                            logger=logger,
+                            learning_rate=args.learning_rate,
+                            weight_decay=args.weight_decay,
+                            magnitude_weight=args.magnitude_weight,
+                            frequency_weight=args.frequency_weight,
+                            correlation_weight=args.correlation_weight
+                    )
                 
             elif args.model == "compare":
                 logger.info("Training Both Models for Comparison")
-                # Create both models
-                simple_model = create_shared_lstm_model(
-                    input_features=datasets['input_features'],
-                    metadata_features=datasets['metadata_features'],
-                    lookback_years=args.lookback_years,
-                    logger=logger
-                )
                 
-                attention_model = create_attention_shared_lstm_model(
-                    input_features=datasets['input_features'],
-                    metadata_features=datasets['metadata_features'],
-                    lookback_years=args.lookback_years,
-                    logger=logger
-                )
-                
-                # Use ModelComparisonTrainer to train both models
-                comparison_trainer = ModelComparisonTrainer(
-                    train_loader=datasets['train_loader'],
-                    val_loader=datasets['val_loader'],
-                    test_loader=datasets['test_loader'],
-                    learning_rate=args.learning_rate,
-                    weight_decay=args.weight_decay,
-                    magnitude_weight=args.magnitude_weight,
-                    frequency_weight=args.frequency_weight,
-                    correlation_weight=args.correlation_weight,
-                    device='auto'
-                )
-                
-                # Train both models
-                simple_results = comparison_trainer.train_model(
-                    model=simple_model,
-                    model_name="SharedLSTM",
-                    max_epochs=args.num_epochs,
-                    patience=12
-                )
-                
-                attention_results = comparison_trainer.train_model(
-                    model=attention_model,
-                    model_name="AttentionSharedLSTM",
-                    max_epochs=args.num_epochs,
-                    patience=12
-                )
+                # Check if using optimized configuration
+                if args.optimized_config and OPTIMIZED_CONFIGS_AVAILABLE:
+                    logger.info(f"Using optimized configuration: {args.optimized_config}")
+                    config = load_optimized_config(args.optimized_config)
+                    if config:
+                        # Create models with optimized parameters
+                        simple_model = create_optimized_model(
+                            SharedLSTMModel, 
+                            config,
+                            input_features=datasets['input_features'],
+                            metadata_features=datasets['metadata_features'],
+                            lookback_years=args.lookback_years,
+                            logger=logger
+                        )
+                        
+                        attention_model = create_optimized_model(
+                            AttentionSharedLSTMModel, 
+                            config,
+                            input_features=datasets['input_features'],
+                            metadata_features=datasets['metadata_features'],
+                            lookback_years=args.lookback_years,
+                            logger=logger
+                        )
+                        
+                        # Get training parameters from config
+                        train_params = get_all_training_params(config)
+                        logger.info(f"Using optimized training parameters:")
+                        for key, value in train_params.items():
+                            logger.info(f"   {key}: {value}")
+                        
+                        # Use ModelComparisonTrainer with optimized parameters
+                        comparison_trainer = ModelComparisonTrainer(
+                            train_loader=datasets['train_loader'],
+                            val_loader=datasets['val_loader'],
+                            test_loader=datasets['test_loader'],
+                            learning_rate=train_params['learning_rate'],
+                            weight_decay=train_params['weight_decay'],
+                            magnitude_weight=train_params['magnitude_weight'],
+                            frequency_weight=train_params['frequency_weight'],
+                            correlation_weight=train_params['correlation_weight'],
+                            device='auto'
+                        )
+                        
+                        # Train both models with optimized parameters
+                        simple_results = comparison_trainer.train_model(
+                            model=simple_model,
+                            model_name="SharedLSTM",
+                            max_epochs=train_params['num_epochs'],
+                            patience=train_params['patience']
+                        )
+                        
+                        attention_results = comparison_trainer.train_model(
+                            model=attention_model,
+                            model_name="AttentionSharedLSTM",
+                            max_epochs=train_params['num_epochs'],
+                            patience=train_params['patience']
+                        )
+                    else:
+                        logger.warning("⚠️  Failed to load optimized config, using default parameters")
+                        # Fall back to default models and parameters
+                        simple_model = create_shared_lstm_model(
+                            input_features=datasets['input_features'],
+                            metadata_features=datasets['metadata_features'],
+                            lookback_years=args.lookback_years,
+                            logger=logger
+                        )
+                        
+                        attention_model = create_attention_shared_lstm_model(
+                            input_features=datasets['input_features'],
+                            metadata_features=datasets['metadata_features'],
+                            lookback_years=args.lookback_years,
+                            logger=logger
+                        )
+                        
+                        # Use ModelComparisonTrainer with default parameters
+                        comparison_trainer = ModelComparisonTrainer(
+                            train_loader=datasets['train_loader'],
+                            val_loader=datasets['val_loader'],
+                            test_loader=datasets['test_loader'],
+                            learning_rate=args.learning_rate,
+                            weight_decay=args.weight_decay,
+                            magnitude_weight=args.magnitude_weight,
+                            frequency_weight=args.frequency_weight,
+                            correlation_weight=args.correlation_weight,
+                            device='auto'
+                        )
+                        
+                        # Train both models with default parameters
+                        simple_results = comparison_trainer.train_model(
+                            model=simple_model,
+                            model_name="SharedLSTM",
+                            max_epochs=args.num_epochs,
+                            patience=15
+                        )
+                        
+                        attention_results = comparison_trainer.train_model(
+                            model=attention_model,
+                            model_name="AttentionSharedLSTM",
+                            max_epochs=args.num_epochs,
+                            patience=15
+                        )
+                else:
+                    # Use default parameters
+                    logger.info("Note: Using default hyperparameters for fair comparison")
+                    simple_model = create_shared_lstm_model(
+                        input_features=datasets['input_features'],
+                        metadata_features=datasets['metadata_features'],
+                        lookback_years=args.lookback_years,
+                        logger=logger
+                    )
+                    
+                    attention_model = create_attention_shared_lstm_model(
+                        input_features=datasets['input_features'],
+                        metadata_features=datasets['metadata_features'],
+                        lookback_years=args.lookback_years,
+                        logger=logger
+                    )
+                    
+                    # Use ModelComparisonTrainer with default parameters
+                    comparison_trainer = ModelComparisonTrainer(
+                        train_loader=datasets['train_loader'],
+                        val_loader=datasets['val_loader'],
+                        test_loader=datasets['test_loader'],
+                        learning_rate=args.learning_rate,
+                        weight_decay=args.weight_decay,
+                        magnitude_weight=args.magnitude_weight,
+                        frequency_weight=args.frequency_weight,
+                        correlation_weight=args.correlation_weight,
+                        device='auto'
+                    )
+                    
+                    # Train both models with default parameters
+                    simple_results = comparison_trainer.train_model(
+                        model=simple_model,
+                        model_name="SharedLSTM",
+                        max_epochs=args.num_epochs,
+                        patience=15
+                    )
+                    
+                    attention_results = comparison_trainer.train_model(
+                        model=attention_model,
+                        model_name="AttentionSharedLSTM",
+                        max_epochs=args.num_epochs,
+                        patience=15
+                    )
                 
                 # Save models with distinct names
                 simple_save_path = Path(results_dir) / "shared_best_model.pth"
@@ -1641,17 +1922,44 @@ def main():
             logger.info("\n" + "="*50)
             logger.info("MODEL COMPARISON: Simple LSTM vs Attention LSTM")
             logger.info("="*50)
-            logger.info("Note: Using same hyperparameters as full pipeline for fair comparison")
             
-            # Get appropriate data path
-            if args.mode == 'full_pipeline':
+            # Check if using optimized configuration
+            if args.optimized_config and OPTIMIZED_CONFIGS_AVAILABLE:
+                logger.info(f"Using optimized configuration: {args.optimized_config}")
+                config = load_optimized_config(args.optimized_config)
+                if config:
+                    # Use optimized hyperparameters
+                    train_params = get_training_params(config)
+                    logger.info(f"Using optimized training parameters:")
+                    for key, value in train_params.items():
+                        logger.info(f"   {key}: {value}")
+                else:
+                    logger.warning("⚠️  Failed to load optimized config, using default parameters")
+                    train_params = {
+                        'learning_rate': args.learning_rate,
+                        'weight_decay': args.weight_decay,
+                        'magnitude_weight': args.magnitude_weight,
+                        'frequency_weight': args.frequency_weight,
+                        'correlation_weight': args.correlation_weight
+                    }
+            else:
+                logger.info("Note: Using default hyperparameters for fair comparison")
+                train_params = {
+                    'learning_rate': args.learning_rate,
+                    'weight_decay': args.weight_decay,
+                    'magnitude_weight': args.magnitude_weight,
+                    'frequency_weight': args.frequency_weight,
+                    'correlation_weight': args.correlation_weight
+                }
+            
+            # Get appropriate data path - FIXED: Use correct logic
+            if Path(args.input_data).exists():
+                data_path = args.input_data
+            elif (output_dir / "processed_earthquake_catalog_annual_stats.csv").exists():
                 data_path = output_dir / "processed_earthquake_catalog_annual_stats.csv"
             else:
-                data_path = args.input_data
-            
-            if not Path(data_path).exists():
-                logger.error(f"Data file not found: {data_path}")
-                logger.error("Please run preprocessing first or use --mode full_pipeline")
+                logger.error("No suitable data file found!")
+                logger.error("Please ensure either --input_data exists or run preprocessing first")
                 sys.exit(1)
             
             # Create datasets for comparison
@@ -1672,12 +1980,7 @@ def main():
                 datasets=datasets,
                 save_dir=str(output_dir / "results"),
                 logger=logger,
-                num_epochs=args.num_epochs,
-                learning_rate=args.learning_rate,
-                weight_decay=args.weight_decay,
-                magnitude_weight=args.magnitude_weight,
-                frequency_weight=args.frequency_weight,
-                correlation_weight=args.correlation_weight
+                **train_params
             )
             
             logger.info(f"Model comparison completed! Results saved to: {output_dir / 'results' / 'model_comparison'}")

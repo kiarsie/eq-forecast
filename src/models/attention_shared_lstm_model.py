@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Attention-Based Shared LSTM Model for Earthquake Forecasting
+Attention-Enhanced Shared LSTM Model for Earthquake Forecasting
 
-Extends the shared LSTM with attention mechanism:
+Extends the shared LSTM with attention mechanism using the same configurations:
 - LSTM(64, return_sequences=True) -> LSTM(32, return_sequences=True) with attention
 - Concatenation with bin metadata features
-- Dual output heads: magnitude (regression) and frequency (Softplus activation)
-- Weighted loss combining MSE (magnitude) and MSE (frequency with log1p preprocessing)
-- REFACTOR: Same configurable loss weights alpha=1.0, beta=1.0, gamma=0.0
+- Dual output heads: max magnitude (continuous) and frequency (log-frequency)
+- Weighted loss combining MSE (magnitude) and MSE (log-frequency)
+- Same configurable loss weights alpha=2.0, beta=1.0, gamma=0.0
+- Identical frequency head architecture and scaling parameters
 """
 
 import torch
@@ -16,65 +17,42 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Tuple, Dict, Optional
 import logging
-from .shared_lstm_model import WeightedEarthquakeLoss  # REFACTOR: Use the same refactored loss function
+from .shared_lstm_model import WeightedEarthquakeLoss  # Use the same refactored loss function
 
 
-class MultiHeadAttention(nn.Module):
+class SimpleWeightedAttention(nn.Module):
     """
-    Multi-head attention mechanism for sequence modeling.
+    Extremely simple attention: just learnable weights for each timestep.
+    No complex projections, no multi-head complexity - just weights that sum to 1.
     """
     
-    def __init__(self, embed_dim: int, num_heads: int = 8, dropout: float = 0.1):
-        super(MultiHeadAttention, self).__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
+    def __init__(self, seq_length: int = 10):
+        super(SimpleWeightedAttention, self).__init__()
+        self.seq_length = seq_length
         
-        assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+        # Learnable weights for each timestep (initialize to uniform)
+        self.timestep_weights = nn.Parameter(torch.ones(seq_length) / seq_length)
         
-        self.q_proj = nn.Linear(embed_dim, embed_dim)
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
-        self.dropout = nn.Dropout(dropout)
-        
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of multi-head attention.
+        Apply learned weights to each timestep.
         
         Args:
             x: Input tensor of shape (batch_size, seq_len, embed_dim)
-            mask: Optional attention mask
             
         Returns:
-            Attended output tensor
+            Weighted output tensor
         """
         batch_size, seq_len, embed_dim = x.shape
         
-        # Project to Q, K, V
-        q = self.q_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        # Ensure weights sum to 1 (softmax for stability)
+        weights = F.softmax(self.timestep_weights, dim=0)
         
-        # Compute attention scores
-        scores = torch.matmul(q, k.transpose(-2, -1)) / np.sqrt(self.head_dim)
+        # Apply weights to each timestep
+        # Shape: (batch_size, seq_len, embed_dim)
+        weighted_output = x * weights.unsqueeze(0).unsqueeze(-1)
         
-        if mask is not None:
-            scores = scores.masked_fill(mask == 0, -1e9)
-        
-        # Apply softmax and dropout
-        attn_weights = F.softmax(scores, dim=1)
-        attn_weights = self.dropout(attn_weights)
-        
-        # Apply attention to values
-        attn_output = torch.matmul(attn_weights, v)
-        attn_output = attn_output.transpose(1, 2).contiguous().view(
-            batch_size, seq_len, embed_dim
-        )
-        
-        # Final projection
-        output = self.out_proj(attn_output)
-        return output
+        return weighted_output
 
 
 class AttentionSharedLSTMModel(nn.Module):
@@ -87,10 +65,9 @@ class AttentionSharedLSTMModel(nn.Module):
                  metadata_features: int,
                  lookback_years: int = 10,
                  lstm_hidden_1: int = 64,
-                 lstm_hidden_2: int = 64,
+                 lstm_hidden_2: int = 32,  # FIXED: Match shared LSTM (32, not 64)
                  dense_hidden: int = 32,
                  dropout_rate: float = 0.25,
-                 num_attention_heads: int = 4,
                  freq_head_type: str = "linear"):
         super(AttentionSharedLSTMModel, self).__init__()
         
@@ -101,10 +78,9 @@ class AttentionSharedLSTMModel(nn.Module):
         self.lstm_hidden_2 = lstm_hidden_2
         self.dense_hidden = dense_hidden
         self.dropout_rate = dropout_rate
-        self.num_attention_heads = num_attention_heads
         self.freq_head_type = freq_head_type
         
-        # LSTM layers for sequential features
+        # LSTM layers for sequential features - EXACTLY like shared LSTM
         self.lstm1 = nn.LSTM(
             input_size=input_seq_features,
             hidden_size=lstm_hidden_1,
@@ -118,20 +94,19 @@ class AttentionSharedLSTMModel(nn.Module):
         )
         
         # Attention mechanism over the sequence
-        self.attention = MultiHeadAttention(
-            embed_dim=lstm_hidden_2,
-            num_heads=num_attention_heads,
-            dropout=dropout_rate
+        self.attention = SimpleWeightedAttention(
+            seq_length=lookback_years
         )
         
-        # Feature concatenation layer
+        # Feature concatenation layer - EXACTLY like shared LSTM
         combined_features = lstm_hidden_2 + metadata_features
         
-        # Dense layers after concatenation
+        # Dense layers after concatenation - EXACTLY like shared LSTM
         self.dense1 = nn.Linear(combined_features, dense_hidden)
-        self.dropout = nn.Dropout(dropout_rate)
+        self.bn1 = nn.BatchNorm1d(dense_hidden)
+        self.dropout1 = nn.Dropout(dropout_rate)
         
-        # [REFACTOR] Deeper MLP funnel for output heads (120 -> 90 -> 30 -> 30 -> 1)
+        # [REFACTOR] Deeper MLP funnel for output heads (120 -> 90 -> 30 -> 30 -> 1) - EXACTLY like shared LSTM
         # Magnitude head: deeper MLP funnel with Linear output (no activation)
         self.magnitude_head = nn.Sequential(
             nn.Linear(dense_hidden, 120),
@@ -149,9 +124,9 @@ class AttentionSharedLSTMModel(nn.Module):
             nn.Linear(30, 1)  # No activation for magnitude
         )
         
-        # [REFACTOR] Frequency head: conditional architecture based on freq_head_type
+        # [REFACTOR] Frequency head: enhanced architecture with learnable scaling - EXACTLY like shared LSTM
         if freq_head_type == "linear":
-            # FIXED: Wider frequency head to prevent narrow predictions
+            # Enhanced frequency head: light hidden layer for better expressiveness
             self.frequency_head = nn.Sequential(
                 nn.Linear(dense_hidden, 120),
                 nn.ReLU(),
@@ -159,12 +134,12 @@ class AttentionSharedLSTMModel(nn.Module):
                 nn.Linear(120, 90),
                 nn.ReLU(),
                 nn.Dropout(dropout_rate * 0.3),
-                nn.Linear(90, 60),  # FIXED: Wider bottleneck (30 -> 60)
+                nn.Linear(90, 30),
                 nn.ReLU(),
                 nn.Dropout(dropout_rate * 0.2),
-                nn.Linear(60, 30),  # FIXED: Wider hidden layer (8 -> 30)
+                nn.Linear(30, 8),  # Light hidden layer
                 nn.ReLU(),
-                nn.Linear(30, 1)    # Output layer
+                nn.Linear(8, 1)    # Output layer
             )
             # FIX: Add learnable scaling parameters for linear mode to prevent prediction collapse
             self.frequency_scale = nn.Parameter(torch.tensor(1.0))
@@ -178,14 +153,14 @@ class AttentionSharedLSTMModel(nn.Module):
                 nn.Linear(120, 90),
                 nn.ReLU(),
                 nn.Dropout(dropout_rate * 0.3),
-                nn.Linear(90, 30),
+                nn.Linear(90, 60),  # Added intermediate layer
                 nn.ReLU(),
                 nn.Dropout(dropout_rate * 0.2),
-                nn.Linear(30, 30),
+                nn.Linear(60, 30),
                 nn.ReLU(),
                 nn.Dropout(dropout_rate * 0.1),
                 nn.Linear(30, 1),
-                nn.Softplus()  # Softplus activation for frequency
+                nn.Identity()  # No activation - let the model learn the full range
             )
             # Learnable scaling parameters for scaled mode
             self.frequency_scale = nn.Parameter(torch.tensor(1.0))
@@ -196,20 +171,19 @@ class AttentionSharedLSTMModel(nn.Module):
         
         # Initialize weights
         self._init_weights()
+        
         self.logger.info(f"AttentionSharedLSTMModel initialized with {sum(p.numel() for p in self.parameters())} parameters")
-        self.logger.info("[REFACTORING] APPLIED:")
-        self.logger.info(f"  - Attention heads: {num_attention_heads}")
-        self.logger.info("  - Attention output aggregation: Mean pooling across timesteps")
-        self.logger.info("  - Deeper MLP funnel: 120 -> 90 -> 30 -> 30 -> 1")
-        self.logger.info("  - Magnitude head: Linear output (no activation)")
-        self.logger.info(f"  - Frequency head type: {freq_head_type}")
+        self.logger.info(f"[REFACTORING] Frequency head type: {freq_head_type}")
         if freq_head_type == "linear":
-            self.logger.info("  - Linear frequency head: light hidden layer (8 neurons)")
+            self.logger.info("  - Linear frequency head: direct log-frequency prediction")
             self.logger.info("  - FIX: Added learnable scaling parameters to prevent collapse")
+            self.logger.info("  - Stable regression in log-space with adaptive scaling")
         else:
-            self.logger.info("  - Scaled frequency head: full funnel with Softplus")
-            self.logger.info("  - Learnable scaling parameters")
-        self.logger.info("  - Removed BatchNorm from final output layers")
+            self.logger.info("  - Scaled frequency head: learnable scaling parameters")
+            self.logger.info("  - Legacy mode for comparison")
+        self.logger.info("  - Magnitude head: Linear output (no activation)")
+        self.logger.info("  - Deeper MLP funnel: 120 -> 90 -> 30 -> 30 -> 1")
+        self.logger.info("  - Attention mechanism: Simple learnable timestep weights")
     
     def _init_weights(self):
         """Initialize model weights using Xavier initialization."""
@@ -227,16 +201,16 @@ class AttentionSharedLSTMModel(nn.Module):
         
         # FIX: Initialize frequency scaling parameters for better training stability
         if hasattr(self, 'frequency_scale') and self.frequency_scale is not None:
-            # ATTENTION MODEL: Even more aggressive initialization to overcome attention dominance
-            # Start with scale=15.0 to force much wider prediction ranges
-            nn.init.constant_(self.frequency_scale, 15.0)
-            self.logger.info("  - Frequency scale initialized to 15.0 (SUPER aggressive for attention model)")
+            # IMPROVED: Initialize scale to a much larger value to encourage wider prediction ranges
+            # Start with scale=10.0 instead of 5.0 to help model learn much broader frequency distributions
+            nn.init.constant_(self.frequency_scale, 10.0)
+            self.logger.info("  - Frequency scale initialized to 10.0 (very aggressive initialization)")
         
         if hasattr(self, 'frequency_bias') and self.frequency_bias is not None:
-            # ATTENTION MODEL: Higher bias to shift predictions up and overcome attention effects
-            # Start with bias=3.0 to force higher frequency predictions
-            nn.init.constant_(self.frequency_bias, 3.0)
-            self.logger.info("  - Frequency bias initialized to 3.0 (SUPER aggressive for attention model)")
+            # IMPROVED: Initialize bias to a larger positive value to shift predictions up
+            # Start with bias=2.0 instead of 1.0 to help model learn higher frequency values
+            nn.init.constant_(self.frequency_bias, 2.0)
+            self.logger.info("  - Frequency bias initialized to 2.0 (very aggressive initialization)")
     
     def forward(self, 
                 input_sequence: torch.Tensor, 
@@ -250,44 +224,47 @@ class AttentionSharedLSTMModel(nn.Module):
             
         Returns:
             Tuple of (magnitude_pred, frequency_pred)
+            - magnitude_pred: continuous magnitude prediction
+            - frequency_pred: log-frequency prediction (raw linear output)
         """
-        # LSTM processing
+        # LSTM processing - EXACTLY like shared LSTM
         lstm_out, _ = self.lstm1(input_sequence)
         lstm_out, (hidden, cell) = self.lstm2(lstm_out)
         
-        # FIX: Simplify attention to be more like simple LSTM
-        # Use last timestep instead of complex attention pooling
-        lstm_final = lstm_out[:, -1, :]  # (batch_size, lstm_hidden_2)
+        # Apply simple weighted attention over the sequence
+        attended_seq = self.attention(lstm_out)
         
-        # Alternative: Simple attention (uncomment if you want to try)
-        # attended_seq = self.attention(lstm_out)
-        # lstm_final = attended_seq[:, -1, :]  # Use last timestep like simple LSTM
+        # Debug: Log attention weights during training
+        if self.training:
+            weights = F.softmax(self.attention.timestep_weights, dim=0)
+            self.logger.info(f"DEBUG: Attention weights: {weights.detach().cpu().numpy()}")
         
-        # Concatenate LSTM output with metadata
+        # Take the last hidden state - EXACTLY like shared LSTM
+        lstm_final = attended_seq[:, -1, :]  # (batch_size, lstm_hidden_2)
+        
+        # Concatenate LSTM output with metadata - EXACTLY like shared LSTM
         combined = torch.cat([lstm_final, metadata], dim=1)
         
-        # Dense layers
+        # Dense layers - EXACTLY like shared LSTM
         dense_out = self.dense1(combined)
+        dense_out = self.bn1(dense_out)
         dense_out = F.relu(dense_out)
-        dense_out = self.dropout(dense_out)
+        dense_out = self.dropout1(dense_out)
         
-        # Dual output heads
+        # Dual output heads - EXACTLY like shared LSTM
         magnitude_pred = self.magnitude_head(dense_out)
-        frequency_pred = self.frequency_head(dense_out)
+        frequency_pred = self.frequency_head(dense_out)  # Raw output (no activation)
         
-        # FIX: Apply scaling to both frequency head types to prevent prediction collapse
-        if self.freq_head_type == "linear":
+        # Apply scaling based on head type - EXACTLY like shared LSTM
+        if self.freq_head_type == "scaled" and self.frequency_scale is not None:
+            # Legacy scaled mode
+            frequency_pred = self.frequency_scale * frequency_pred + self.frequency_bias
+            frequency_pred = F.softplus(frequency_pred) + 1e-6  # Softplus for positivity
+        # FIX: Apply scaling to linear mode as well to prevent prediction collapse
+        elif self.freq_head_type == "linear" and self.frequency_scale is not None:
             # Linear mode: apply scaling to match target ranges
             frequency_pred = self.frequency_scale * frequency_pred + self.frequency_bias
-            # Add epsilon to prevent zero values
-            frequency_pred = frequency_pred + 1e-6
-        else:
-            # Scaled mode: apply scaling and activation
-            frequency_pred = self.frequency_scale * frequency_pred + self.frequency_bias
-            # Already has Softplus activation, add epsilon
-            frequency_pred = frequency_pred + 1e-6
-        
-
+        # For both modes, return scaled output
         
         return magnitude_pred, frequency_pred
     
@@ -296,10 +273,10 @@ class AttentionSharedLSTMModel(nn.Module):
         Convert frequency predictions to expected count predictions.
         
         Args:
-            frequency_pred: frequency predictions (scaled output from both modes)
+            frequency_pred: frequency predictions (scaled log-frequency for both modes)
             
         Returns:
-            Expected count predictions converted from scaled space to raw counts
+            Expected count predictions converted to raw counts
         """
         # FIX: frequency_pred is already scaled by the model's learnable parameters
         # Both modes now output scaled values that need to be converted to raw counts

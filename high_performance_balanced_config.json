@@ -1,0 +1,57 @@
+{
+  "name": "High Performance Balanced Configuration",
+  "description": "Configuration optimized for both high magnitude accuracy and maximum frequency range coverage",
+  "version": "1.0",
+  "model_architecture": {
+    "input_seq_features": 10,
+    "metadata_features": 5,
+    "lookback_years": 10,
+    "lstm_hidden_1": 64,
+    "lstm_hidden_2": 48,
+    "dense_hidden": 32,
+    "dropout_rate": 0.25,
+    "freq_head_type": "linear"
+  },
+  "training_parameters": {
+    "learning_rate": 0.0004,
+    "weight_decay": 0.0003,
+    "num_epochs": 150,
+    "patience": 20,
+    "batch_size": 32,
+    "gradient_clip": 0.4,
+    "scheduler_T0": 20,
+    "scheduler_T_mult": 2
+  },
+  "loss_weights": {
+    "magnitude_weight": 1.5,
+    "frequency_weight": 1.0,
+    "correlation_weight": 0.0
+  },
+  "frequency_scaling": {
+    "frequency_scale_init": 18.0,
+    "frequency_bias_init": 4.0,
+    "scaling_lr_multiplier": 30,
+    "scaling_wd_multiplier": 1.5
+  },
+  "performance_features": {
+    "high_magnitude_accuracy": true,
+    "aggressive_frequency_scaling": true,
+    "increased_model_capacity": true,
+    "optimized_learning_rates": true,
+    "extended_training_time": true,
+    "enhanced_early_stopping": true
+  },
+  "expected_behavior": {
+    "frequency_accuracy_target": "80-95% (excellent performance)",
+    "magnitude_accuracy_target": "85-95% (high accuracy)",
+    "prediction_range_target": "95-99% of target range",
+    "frequency_scaling_target": "Scale: 15.0-22.0, Bias: 3.5-5.0",
+    "magnitude_improvement": "15-25% better than current 62.5%"
+  },
+  "usage_notes": [
+    "Use with: --optimized_config high_performance_balanced",
+    "This configuration maximizes both magnitude accuracy and frequency range",
+    "Expect excellent overall performance with broad prediction ranges",
+    "Best configuration for production deployment"
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "name": "Anti-Overfitting Configuration",
+  "description": "Configuration designed to prevent overfitting with reduced complexity and increased regularization",
+  "version": "1.0",
+  "model_architecture": {
+    "input_seq_features": 10,
+    "metadata_features": 5,
+    "lookback_years": 10,
+    "lstm_hidden_1": 32,
+    "lstm_hidden_2": 16,
+    "dense_hidden": 16,
+    "dropout_rate": 0.5,
+    "freq_head_type": "linear"
+  },
+  "training_parameters": {
+    "learning_rate": 0.0003,
+    "weight_decay": 0.001,
+    "num_epochs": 80,
+    "patience": 8,
+    "batch_size": 16,
+    "gradient_clip": 0.3,
+    "scheduler_T0": 10,
+    "scheduler_T_mult": 2
+  },
+  "loss_weights": {
+    "magnitude_weight": 1.0,
+    "frequency_weight": 1.0,
+    "correlation_weight": 0.0
+  },
+  "frequency_scaling": {
+    "frequency_scale_init": 5.0,
+    "frequency_bias_init": 1.0,
+    "scaling_lr_multiplier": 10,
+    "scaling_wd_multiplier": 2
+  },
+  "anti_overfitting_features": {
+    "early_stopping": true,
+    "learning_rate_scheduling": true,
+    "gradient_clipping": true,
+    "reduced_model_complexity": true,
+    "increased_dropout": true,
+    "aggressive_weight_decay": true,
+    "smaller_batch_size": true,
+    "reduced_training_epochs": true
+  },
+  "expected_behavior": {
+    "frequency_accuracy_target": "60-80% (realistic, not overfitted)",
+    "magnitude_accuracy_target": "65-85% (realistic, not overfitted)",
+    "prediction_range_target": "80-95% of target range",
+    "overfitting_indicators": "Should NOT see 100% accuracy or severe range compression"
+  },
+  "usage_notes": [
+    "Use with: --optimized_config anti_overfitting",
+    "This configuration prioritizes generalization over memorization",
+    "Expect lower but more realistic performance metrics",
+    "Models trained with this config will be more trustworthy for production"
+  ]
+}
+

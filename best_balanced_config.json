@@ -1,0 +1,37 @@
+{
+  "name": "Best Balanced Performance",
+  "description": "Balanced configuration for both frequency and magnitude prediction",
+  "performance": {
+    "frequency_range": 25.0,
+    "magnitude_range": 0.9,
+    "model_type": "simple",
+    "combined_score": 25.9
+  },
+  "hyperparameters": {
+    "input_seq_features": 12,
+    "metadata_features": 4,
+    "lookback_years": 10,
+    "lstm_hidden_1": 64,
+    "lstm_hidden_2": 32,
+    "dense_hidden": 32,
+    "dropout_rate": 0.25,
+    "freq_head_type": "linear",
+    "learning_rate": 5e-4,
+    "weight_decay": 7.5e-5,
+    "num_epochs": 300,
+    "patience": 15,
+    "batch_size": 32,
+    "magnitude_weight": 1.75,
+    "frequency_weight": 1.25,
+    "correlation_weight": 0.0,
+    "frequency_scale_init": 20.0,
+    "frequency_bias_init": 3.0,
+    "scaling_lr_multiplier": 22,
+    "scaling_wd_multiplier": 4,
+    "gradient_clip": 0.5,
+    "scheduler_T0": 15,
+    "scheduler_T_mult": 2
+  },
+  "tuning_notes": "This balanced configuration combines the best of both worlds:\n- frequency_scale_init: 20.0 (between best frequency and best magnitude)\n- frequency_bias_init: 3.0 (optimal for both)\n- weight_decay: 7.5e-5 (balanced regularization)\n- magnitude_weight: 1.75, frequency_weight: 1.25 (balanced loss)\n- scaling_lr_multiplier: 22, scaling_wd_multiplier: 4 (balanced scaling)\n\nExpected to provide good performance for both frequency and magnitude prediction."
+}
+

@@ -1,0 +1,36 @@
+{
+  "name": "Best Frequency Prediction",
+  "description": "Optimized for maximum frequency prediction range (49.39)",
+  "performance": {
+    "frequency_range": 49.3923,
+    "magnitude_range": 0.3504,
+    "model_type": "simple"
+  },
+  "hyperparameters": {
+    "input_seq_features": 12,
+    "metadata_features": 4,
+    "lookback_years": 10,
+    "lstm_hidden_1": 64,
+    "lstm_hidden_2": 32,
+    "dense_hidden": 32,
+    "dropout_rate": 0.25,
+    "freq_head_type": "linear",
+    "learning_rate": 5e-4,
+    "weight_decay": 5e-5,
+    "num_epochs": 300,
+    "patience": 15,
+    "batch_size": 32,
+    "magnitude_weight": 1.5,
+    "frequency_weight": 1.5,
+    "correlation_weight": 0.0,
+    "frequency_scale_init": 25.0,
+    "frequency_bias_init": 3.0,
+    "scaling_lr_multiplier": 20,
+    "scaling_wd_multiplier": 2,
+    "gradient_clip": 0.5,
+    "scheduler_T0": 15,
+    "scheduler_T_mult": 2
+  },
+  "tuning_notes": "This configuration achieved the highest frequency prediction range (49.39) by:\n- Increasing frequency_scale_init from 10.0 to 25.0\n- Increasing frequency_bias_init from 2.0 to 3.0\n- Reducing weight_decay from 1e-4 to 5e-5\n- Balancing magnitude_weight and frequency_weight at 1.5\n- Reducing scaling_wd_multiplier from 3 to 2"
+}
+

@@ -1,0 +1,56 @@
+{
+  "name": "Enhanced Frequency Scaling Configuration",
+  "description": "Configuration with aggressive frequency scaling to maximize prediction range coverage",
+  "version": "1.0",
+  "model_architecture": {
+    "input_seq_features": 10,
+    "metadata_features": 5,
+    "lookback_years": 10,
+    "lstm_hidden_1": 48,
+    "lstm_hidden_2": 32,
+    "dense_hidden": 24,
+    "dropout_rate": 0.3,
+    "freq_head_type": "linear"
+  },
+  "training_parameters": {
+    "learning_rate": 0.0005,
+    "weight_decay": 0.0005,
+    "num_epochs": 120,
+    "patience": 15,
+    "batch_size": 24,
+    "gradient_clip": 0.5,
+    "scheduler_T0": 15,
+    "scheduler_T_mult": 2
+  },
+  "loss_weights": {
+    "magnitude_weight": 1.0,
+    "frequency_weight": 1.0,
+    "correlation_weight": 0.0
+  },
+  "frequency_scaling": {
+    "frequency_scale_init": 15.0,
+    "frequency_bias_init": 3.0,
+    "scaling_lr_multiplier": 25,
+    "scaling_wd_multiplier": 2.0
+  },
+  "enhanced_features": {
+    "aggressive_frequency_scaling": true,
+    "increased_scaling_learning_rate": true,
+    "balanced_model_complexity": true,
+    "moderate_regularization": true,
+    "extended_training": true,
+    "enhanced_patience": true
+  },
+  "expected_behavior": {
+    "frequency_accuracy_target": "75-90% (realistic, not overfitted)",
+    "magnitude_accuracy_target": "75-90% (realistic, not overfitted)",
+    "prediction_range_target": "90-98% of target range",
+    "frequency_scaling_target": "Scale: 12.0-18.0, Bias: 2.5-4.0"
+  },
+  "usage_notes": [
+    "Use with: --optimized_config enhanced_frequency_scaling",
+    "This configuration prioritizes frequency range expansion",
+    "Expect excellent range coverage with realistic accuracy",
+    "Models will have broader prediction ranges"
+  ]
+}

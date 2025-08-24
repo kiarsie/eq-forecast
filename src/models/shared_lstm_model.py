@@ -157,16 +157,16 @@ class SharedLSTMModel(nn.Module):
         
         # FIX: Initialize frequency scaling parameters for better training stability
         if hasattr(self, 'frequency_scale') and self.frequency_scale is not None:
-            # IMPROVED: Initialize scale to a larger value to encourage wider prediction ranges
-            # Start with scale=5.0 instead of 2.0 to help model learn much broader frequency distributions
-            nn.init.constant_(self.frequency_scale, 5.0)
-            self.logger.info("  - Frequency scale initialized to 5.0 (aggressive initialization)")
+            # IMPROVED: Initialize scale to a much larger value to encourage wider prediction ranges
+            # Start with scale=10.0 instead of 5.0 to help model learn much broader frequency distributions
+            nn.init.constant_(self.frequency_scale, 10.0)
+            self.logger.info("  - Frequency scale initialized to 10.0 (very aggressive initialization)")
         
         if hasattr(self, 'frequency_bias') and self.frequency_bias is not None:
             # IMPROVED: Initialize bias to a larger positive value to shift predictions up
-            # Start with bias=1.0 instead of 0.5 to help model learn higher frequency values
-            nn.init.constant_(self.frequency_bias, 1.0)
-            self.logger.info("  - Frequency bias initialized to 1.0 (aggressive initialization)")
+            # Start with bias=2.0 instead of 1.0 to help model learn higher frequency values
+            nn.init.constant_(self.frequency_bias, 2.0)
+            self.logger.info("  - Frequency bias initialized to 2.0 (very aggressive initialization)")
     
     def forward(self, 
                 input_sequence: torch.Tensor, 
@@ -298,12 +298,18 @@ class WeightedEarthquakeLoss(nn.Module):
         # FIX: frequency_pred is now scaled, compare directly with log1p targets
         # The model learns to output values in the same scale as log1p targets
         
-        # Frequency loss: MSE on log1p scale
+        # ADD: Range expansion penalty to prevent prediction collapse
+        freq_range_penalty = torch.exp(-torch.std(frequency_pred))  # Penalize narrow ranges
+        mag_range_penalty = torch.exp(-torch.std(magnitude_pred))   # Penalize narrow magnitude ranges
+        
+        # Compute weighted loss
         frequency_loss = F.mse_loss(frequency_pred, frequency_true_log1p)
         
-        # REFACTOR: Weighted combination with rebalanced weights
+        # Total loss with range expansion penalties
         total_loss = (self.magnitude_weight * magnitude_loss + 
-                     self.frequency_weight * frequency_loss)
+                     self.frequency_weight * frequency_loss + 
+                     0.1 * freq_range_penalty +  # Range penalty for frequency
+                     0.1 * mag_range_penalty)    # Range penalty for magnitude
         
         return total_loss
     
