@@ -89,6 +89,38 @@ class EnhancedSharedDataset(Dataset):
         Returns:
             DataFrame with annual earthquake statistics per bin
         """
+        # Check if data is LSTM-ready format (has target columns)
+        if 'target_year' in self.raw_data.columns and 'target_max_magnitude' in self.raw_data.columns:
+            self.logger.info("Data appears to be LSTM-ready format with pre-computed targets. Using as-is.")
+            # Data is already in LSTM sequence format, just ensure proper column names and types
+            processed_data = self.raw_data.copy()
+            
+            # Ensure year and target_year columns are numeric
+            if 'year' in processed_data.columns:
+                processed_data['year'] = pd.to_numeric(processed_data['year'], errors='coerce')
+            if 'target_year' in processed_data.columns:
+                processed_data['target_year'] = pd.to_numeric(processed_data['target_year'], errors='coerce')
+            
+            # Ensure bin_id is string
+            processed_data['bin_id'] = processed_data['bin_id'].astype(str)
+            
+            # Filter for valid years (1910-2025)
+            processed_data = processed_data[
+                (processed_data['year'] >= 1910) & 
+                (processed_data['year'] <= 2025) &
+                (processed_data['target_year'] >= 1910) & 
+                (processed_data['target_year'] <= 2025)
+            ].copy()
+            
+            # Sort by bin_id, year, and target_year
+            processed_data = processed_data.sort_values(['bin_id', 'year', 'target_year']).reset_index(drop=True)
+            
+            self.logger.info(f"Using LSTM-ready data: {len(processed_data)} records, {processed_data['bin_id'].nunique()} bins")
+            self.logger.info(f"Year range: {processed_data['year'].min()} - {processed_data['year'].max()}")
+            self.logger.info(f"Target year range: {processed_data['target_year'].min()} - {processed_data['target_year'].max()}")
+            
+            return processed_data
+        
         # Check if data is already processed annual statistics
         if 'frequency' in self.raw_data.columns and 'bin_id' in self.raw_data.columns:
             self.logger.info("Data appears to be pre-processed annual statistics. Using as-is.")
@@ -258,6 +290,11 @@ class EnhancedSharedDataset(Dataset):
         """
         sequences = []
         
+        # Check if data is LSTM-ready format (has target columns)
+        if 'target_year' in self.annual_data.columns:
+            self.logger.info("Processing LSTM-ready data with pre-computed targets")
+            return self._prepare_lstm_ready_sequences()
+        
         # 🔧 FIX: Ensure deterministic bin processing order
         bin_ids = sorted(self.annual_data['bin_id'].unique())
         self.logger.info(f"Processing {len(bin_ids)} bins in deterministic order")
@@ -319,6 +356,88 @@ class EnhancedSharedDataset(Dataset):
         
         return sequences
     
+    def _prepare_lstm_ready_sequences(self) -> List[Dict]:
+        """
+        Prepare sequences from LSTM-ready data with pre-computed targets.
+        
+        Returns:
+            List of sequence dictionaries with split information
+        """
+        sequences = []
+        
+        # 🔧 FIX: Ensure deterministic bin processing order
+        bin_ids = sorted(self.annual_data['bin_id'].unique())
+        self.logger.info(f"Processing {len(bin_ids)} bins in deterministic order")
+        
+        # Group by bin_id
+        for bin_id in bin_ids:
+            bin_data = self.annual_data[self.annual_data['bin_id'] == bin_id].copy()
+            bin_data = bin_data.sort_values(['year', 'target_year']).reset_index(drop=True)
+            
+            # Add rolling features
+            bin_data = self._add_rolling_features(bin_data)
+            
+            # Create sequences from pre-computed targets
+            for i in range(len(bin_data)):
+                row = bin_data.iloc[i]
+                
+                # Determine data split based on target year
+                target_year = row['target_year']
+                
+                if target_year <= self.train_end_year:
+                    split = 'train'
+                elif target_year <= self.val_end_year:
+                    split = 'val'
+                else:
+                    split = 'test'
+                
+                # Create input sequence (lookback years before target)
+                target_year_int = int(target_year)
+                input_start_year = target_year_int - self.lookback_years
+                
+                # Find input sequence data
+                input_data = bin_data[
+                    (bin_data['year'] >= input_start_year) & 
+                    (bin_data['year'] < target_year_int)
+                ].copy()
+                
+                # Only include if we have complete input sequence
+                if len(input_data) >= self.lookback_years:
+                    # Take the last lookback_years for input
+                    input_sequence = input_data.tail(self.lookback_years)
+                    
+                    # Create target sequence from current row
+                    target_sequence = pd.DataFrame([{
+                        'year': row['target_year'],
+                        'max_magnitude': row['target_max_magnitude'],
+                        'frequency': row['target_frequency']
+                    }])
+                    
+                    sequences.append({
+                        'bin_id': bin_id,
+                        'split': split,
+                        'input_sequence': input_sequence,
+                        'target_sequence': target_sequence,
+                        'input_years': input_sequence['year'].tolist(),
+                        'target_years': target_sequence['year'].tolist()
+                    })
+        
+        # 🔧 ENHANCED: Log sequence distribution for debugging
+        train_count = sum(1 for seq in sequences if seq['split'] == 'train')
+        val_count = sum(1 for seq in sequences if seq['split'] == 'val')
+        test_count = sum(1 for seq in sequences if seq['split'] == 'test')
+        
+        self.logger.info(f"Sequence distribution: Train={train_count}, Val={val_count}, Test={test_count}")
+        
+        # Log test set target ranges for debugging
+        test_sequences = [seq for seq in sequences if seq['split'] == 'test']
+        if test_sequences:
+            test_freqs = [seq['target_sequence']['frequency'].iloc[0] for seq in test_sequences]
+            test_mags = [seq['target_sequence']['max_magnitude'].iloc[0] for seq in test_sequences]
+            self.logger.info(f"Test set target ranges - Frequency: [{min(test_freqs):.1f}, {max(test_freqs):.1f}], Magnitude: [{min(test_mags):.1f}, {max(test_mags):.1f}]")
+        
+        return sequences
+    
     def _setup_normalization(self):
         """Setup normalization parameters for features."""
         # Get all values for normalization
@@ -346,10 +465,123 @@ class EnhancedSharedDataset(Dataset):
         if self.frequency_log1p_std == 0:
             self.frequency_log1p_std = 1.0
         
+        # 🔧 NEW: Store normalization parameters for persistence
+        self.normalization_params = {
+            'max_magnitude_mean': self.max_magnitude_mean,
+            'max_magnitude_std': self.max_magnitude_std,
+            'frequency_mean': self.frequency_mean,
+            'frequency_std': self.frequency_std,
+            'frequency_log1p_mean': self.frequency_log1p_mean,
+            'frequency_log1p_std': self.frequency_log1p_std
+        }
+        
         self.logger.info(f"Normalization parameters:")
         self.logger.info(f"  Max Magnitude: mean={self.max_magnitude_mean:.3f}, std={self.max_magnitude_std:.3f}")
         self.logger.info(f"  Frequency: mean={self.frequency_mean:.3f}, std={self.frequency_std:.3f}")
         self.logger.info(f"  Frequency (log1p): mean={self.frequency_log1p_mean:.3f}, std={self.frequency_log1p_std:.3f}")
+    
+    def save_normalization_params(self, filepath: str):
+        """Save normalization parameters to file for consistency across runs."""
+        import json
+        with open(filepath, 'w') as f:
+            json.dump(self.normalization_params, f, indent=2)
+        self.logger.info(f"Normalization parameters saved to: {filepath}")
+    
+    def load_normalization_params(self, filepath: str):
+        """Load normalization parameters from file to ensure consistency."""
+        import json
+        with open(filepath, 'r') as f:
+            params = json.load(f)
+        
+        # Update instance variables
+        for key, value in params.items():
+            setattr(self, key, value)
+        
+        # Update normalization_params dict
+        self.normalization_params = params
+        self.logger.info(f"Normalization parameters loaded from: {filepath}")
+        self.logger.info(f"  Max Magnitude: mean={self.max_magnitude_mean:.3f}, std={self.max_magnitude_std:.3f}")
+        self.logger.info(f"  Frequency: mean={self.frequency_mean:.3f}, std={self.frequency_std:.3f}")
+        self.logger.info(f"  Frequency (log1p): mean={self.frequency_log1p_mean:.3f}, std={self.frequency_log1p_std:.3f}")
+    
+    def get_normalization_params(self) -> dict:
+        """Get current normalization parameters for external use."""
+        return self.normalization_params.copy()
+    
+    def set_normalization_params(self, params: dict):
+        """Set normalization parameters from external source."""
+        for key, value in params.items():
+            setattr(self, key, value)
+        
+        # Update normalization_params dict
+        self.normalization_params = params
+        self.logger.info(f"Normalization parameters set externally:")
+        self.logger.info(f"  Max Magnitude: mean={self.max_magnitude_mean:.3f}, std={self.max_magnitude_std:.3f}")
+        self.logger.info(f"  Frequency: mean={self.frequency_mean:.3f}, std={self.frequency_std:.3f}")
+        self.logger.info(f"  Frequency (log1p): mean={self.frequency_log1p_mean:.3f}, std={self.frequency_log1p_std:.3f}")
+    
+    def validate_target_ranges(self, split: str = 'test') -> dict:
+        """Validate target ranges for consistency across evaluations."""
+        split_seqs = self.get_split_sequences(split)
+        
+        if not split_seqs:
+            self.logger.warning(f"No sequences found for split: {split}")
+            return {}
+        
+        # Extract target ranges
+        targets = [seq['target_sequence']['frequency'].iloc[0] for seq in split_seqs]
+        mags = [seq['target_sequence']['max_magnitude'].iloc[0] for seq in split_seqs]
+        
+        target_ranges = {
+            'split': split,
+            'size': len(split_seqs),
+            'frequency': {
+                'min': float(min(targets)),
+                'max': float(max(targets)),
+                'mean': float(np.mean(targets)),
+                'std': float(np.std(targets))
+            },
+            'magnitude': {
+                'min': float(min(mags)),
+                'max': float(max(mags)),
+                'mean': float(np.mean(mags)),
+                'std': float(np.std(mags))
+            }
+        }
+        
+        # Log validation results
+        self.logger.info(f"Target range validation for {split} split:")
+        self.logger.info(f"  Size: {target_ranges['size']}")
+        self.logger.info(f"  Frequency: {target_ranges['frequency']['min']:.2f} to {target_ranges['frequency']['max']:.2f}")
+        self.logger.info(f"  Magnitude: {target_ranges['magnitude']['min']:.2f} to {target_ranges['magnitude']['max']:.2f}")
+        
+        return target_ranges
+    
+    def assert_target_consistency(self, expected_ranges: dict, tolerance: float = 0.01):
+        """Assert that target ranges are consistent with expected values."""
+        current_ranges = self.validate_target_ranges()
+        
+        # Check frequency consistency
+        freq_min_diff = abs(current_ranges['frequency']['min'] - expected_ranges['frequency']['min'])
+        freq_max_diff = abs(current_ranges['frequency']['max'] - expected_ranges['frequency']['max'])
+        
+        # Check magnitude consistency
+        mag_min_diff = abs(current_ranges['magnitude']['min'] - expected_ranges['magnitude']['min'])
+        mag_max_diff = abs(current_ranges['magnitude']['max'] - expected_ranges['magnitude']['max'])
+        
+        if (freq_min_diff > tolerance or freq_max_diff > tolerance or 
+            mag_min_diff > tolerance or mag_max_diff > tolerance):
+            error_msg = f"Target range inconsistency detected! Tolerance: {tolerance}"
+            error_msg += f"\nExpected frequency: {expected_ranges['frequency']['min']:.2f} to {expected_ranges['frequency']['max']:.2f}"
+            error_msg += f"\nCurrent frequency: {current_ranges['frequency']['min']:.2f} to {current_ranges['frequency']['max']:.2f}"
+            error_msg += f"\nExpected magnitude: {expected_ranges['magnitude']['min']:.2f} to {expected_ranges['magnitude']['max']:.2f}"
+            error_msg += f"\nCurrent magnitude: {current_ranges['magnitude']['min']:.2f} to {current_ranges['magnitude']['max']:.2f}"
+            
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        self.logger.info(f"[OK] Target range consistency validated (tolerance: {tolerance})")
+        return True
     
     def _normalize_features(self, features: np.ndarray) -> np.ndarray:
         """Normalize features using z-score normalization."""

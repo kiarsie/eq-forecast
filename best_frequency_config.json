@@ -34,3 +34,11 @@
   "tuning_notes": "This configuration achieved the highest frequency prediction range (49.39) by:\n- Increasing frequency_scale_init from 10.0 to 25.0\n- Increasing frequency_bias_init from 2.0 to 3.0\n- Reducing weight_decay from 1e-4 to 5e-5\n- Balancing magnitude_weight and frequency_weight at 1.5\n- Reducing scaling_wd_multiplier from 3 to 2"
 }
 
+
+
+
+
+
+
+
+

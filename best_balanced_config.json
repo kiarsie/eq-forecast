@@ -35,3 +35,11 @@
   "tuning_notes": "This balanced configuration combines the best of both worlds:\n- frequency_scale_init: 20.0 (between best frequency and best magnitude)\n- frequency_bias_init: 3.0 (optimal for both)\n- weight_decay: 7.5e-5 (balanced regularization)\n- magnitude_weight: 1.75, frequency_weight: 1.25 (balanced loss)\n- scaling_lr_multiplier: 22, scaling_wd_multiplier: 4 (balanced scaling)\n\nExpected to provide good performance for both frequency and magnitude prediction."
 }
 
+
+
+
+
+
+
+
+

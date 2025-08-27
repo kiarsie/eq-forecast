@@ -1,31 +1,30 @@
 import logging
 import torch.nn as nn
 from typing import Dict
+from pathlib import Path
 from .shared_lstm_trainer import SharedLSTMTrainer
 from .attention_shared_lstm_trainer import AttentionSharedLSTMTrainer
+from torch.utils.data import DataLoader
+import torch
 
 
 class ModelComparisonTrainer:
     def __init__(self,
-                 train_loader,
-                 val_loader,
-                 test_loader,
-                 input_seq_features: int = 12,
-                 metadata_features: int = 4,
-                 lookback_years: int = 10,
-                 learning_rate: float = 5e-4,
-                 weight_decay: float = 1e-4,
-                 magnitude_weight: float = 2.0,
-                 frequency_weight: float = 1.0,  # FIXED: Changed from 0.5 to 1.0 for consistency
-                 correlation_weight: float = 0.0,
+                 train_loader: DataLoader,
+                 val_loader: DataLoader,
+                 test_loader: DataLoader,
+                 learning_rate: float = 4e-4,      # Updated: was 5e-4, now 4e-4 for better performance
+                 weight_decay: float = 5e-5,       # Updated: was 1e-4, now 5e-5 for better performance
+                 magnitude_weight: float = 1.5,    # Updated: was 2.0, now 1.5 for better balance
+                 frequency_weight: float = 2.0,    # Updated: was 1.0, now 2.0 for better frequency prediction
+                 correlation_weight: float = 0.0,  # gamma: weight for correlation penalty (disabled)
                  device: str = 'auto',
-                 output_dir: str = None):
+                 output_dir: str = None,
+                 config: dict = None):
+        """Initialize the model comparison trainer."""
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.test_loader = test_loader
-        self.input_seq_features = input_seq_features
-        self.metadata_features = metadata_features
-        self.lookback_years = lookback_years
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.magnitude_weight = magnitude_weight
@@ -33,19 +32,51 @@ class ModelComparisonTrainer:
         self.correlation_weight = correlation_weight
         self.device = device
         self.output_dir = output_dir
-
-        # 🔹 set up logger
-        self.logger = logging.getLogger("ModelComparisonTrainer")
+        self.config = config or {}
+        
+        # Setup logger first
+        self.logger = logging.getLogger(__name__)
         if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
+            # Console handler
+            console_handler = logging.StreamHandler()
+            console_formatter = logging.Formatter(
                 "[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S"
             )
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
+            console_handler.setFormatter(console_formatter)
+            self.logger.addHandler(console_handler)
+            
+            # File handler for .log files
+            if output_dir:
+                log_dir = Path(output_dir)
+                log_dir.mkdir(parents=True, exist_ok=True)
+                log_file = log_dir / "training_comparison.log"
+                file_handler = logging.FileHandler(log_file, mode='w')
+                file_handler.setFormatter(console_formatter)
+                self.logger.addHandler(file_handler)
+                self.logger.info(f"Log file created at: {log_file}")
+            
             self.logger.setLevel(logging.INFO)
-
+        
+        # 🔧 NEW: Store normalization parameters for consistency
+        self.normalization_params = None
+        if hasattr(train_loader.dataset, 'get_normalization_params'):
+            self.normalization_params = train_loader.dataset.get_normalization_params()
+            self.logger.info("Normalization parameters captured for consistency")
+        
+        # 🔧 NEW: Validate target ranges at initialization
+        self.expected_target_ranges = None
+        if hasattr(train_loader.dataset, 'validate_target_ranges'):
+            self.expected_target_ranges = train_loader.dataset.validate_target_ranges('test')
+            self.logger.info("Expected target ranges captured for validation")
+        
+        # Setup device
+        if device == 'auto':
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device)
+        
+        self.logger = logging.getLogger(__name__)
         self.logger.info("Initialized ModelComparisonTrainer with identical hyperparameters.")
 
     def run_comparison(self, max_epochs: int = 300, patience: int = 15) -> Dict:
@@ -66,34 +97,45 @@ class ModelComparisonTrainer:
         from .shared_lstm_model import SharedLSTMModel
         from .attention_shared_lstm_model import AttentionSharedLSTMModel
         
-        # Create both models
+        # Create both models with config values
+        model_config = self.config.get('model_architecture', {})
+        freq_scaling = self.config.get('frequency_scaling', {})
+        
+        # 🔧 FIX: Get feature dimensions from the dataset
+        input_features, target_features, metadata_features = self.train_loader.dataset.get_feature_dimensions()
+        lookback_years = 10  # Default value for comparison
+        
         simple_model = SharedLSTMModel(
-            input_seq_features=self.input_seq_features,
-            metadata_features=self.metadata_features,
-            lookback_years=self.lookback_years,
-            lstm_hidden_1=64,
-            lstm_hidden_2=32,
-            dense_hidden=32,
-            dropout_rate=0.25,
-            freq_head_type="linear"
+            input_seq_features=input_features,
+            metadata_features=metadata_features,
+            lookback_years=lookback_years,
+            lstm_hidden_1=model_config.get('lstm_hidden_1', 64),
+            lstm_hidden_2=model_config.get('lstm_hidden_2', 32),
+            dense_hidden=model_config.get('dense_hidden', 32),
+            dropout_rate=model_config.get('dropout_rate', 0.25),
+            freq_head_type=model_config.get('freq_head_type', "linear"),
+            frequency_scale_init=freq_scaling.get('frequency_scale_init', 2.0),
+            frequency_bias_init=freq_scaling.get('frequency_bias_init', 0.5)
         )
         
         attention_model = AttentionSharedLSTMModel(
-            input_seq_features=self.input_seq_features,
-            metadata_features=self.metadata_features,
-            lookback_years=self.lookback_years,
-            lstm_hidden_1=64,
-            lstm_hidden_2=32,
-            dense_hidden=32,
-            dropout_rate=0.25,
-            freq_head_type="linear"
+            input_seq_features=input_features,
+            metadata_features=metadata_features,
+            lookback_years=lookback_years,
+            lstm_hidden_1=model_config.get('lstm_hidden_1', 64),
+            lstm_hidden_2=model_config.get('lstm_hidden_2', 32),
+            dense_hidden=model_config.get('dense_hidden', 32),
+            dropout_rate=model_config.get('dropout_rate', 0.25),
+            freq_head_type=model_config.get('freq_head_type', "linear"),
+            frequency_scale_init=freq_scaling.get('frequency_scale_init', 2.0),
+            frequency_bias_init=freq_scaling.get('frequency_bias_init', 0.5)
         )
         
         # Train both models
         self.logger.info("Training Simple LSTM Model...")
         simple_results = self.train_model(simple_model, "SimpleLSTM", max_epochs, patience)
         
-        self.logger.info("📚 Training Attention LSTM Model...")
+        self.logger.info("Training Attention LSTM Model...")
         attention_results = self.train_model(attention_model, "AttentionSharedLSTM", max_epochs, patience)
         
         # Evaluate both models
@@ -132,7 +174,17 @@ class ModelComparisonTrainer:
         """Evaluate a trained model on the test set."""
         self.logger.info(f"Evaluating {model_name}...")
         
+        # 🔧 NEW: Validate target ranges before evaluation
+        if self.expected_target_ranges and hasattr(self.test_loader.dataset, 'assert_target_consistency'):
+            try:
+                self.test_loader.dataset.assert_target_consistency(self.expected_target_ranges)
+                self.logger.info(f"[OK] Target range consistency validated for {model_name}")
+            except ValueError as e:
+                self.logger.error(f"[ERROR] Target range inconsistency for {model_name}: {e}")
+                # Continue with evaluation but log the issue
+        
         # Create appropriate trainer for evaluation
+        freq_scaling = self.config.get('frequency_scaling', {})
         if "Attention" in model_name:
             trainer = AttentionSharedLSTMTrainer(
                 model=model,
@@ -144,7 +196,9 @@ class ModelComparisonTrainer:
                 magnitude_weight=self.magnitude_weight,
                 frequency_weight=self.frequency_weight,
                 correlation_weight=self.correlation_weight,
-                device=self.device
+                device=self.device,
+                scaling_lr_multiplier=freq_scaling.get('scaling_lr_multiplier', 8.0),
+                scaling_wd_multiplier=freq_scaling.get('scaling_wd_multiplier', 1.0)
             )
         else:
             trainer = SharedLSTMTrainer(
@@ -157,8 +211,15 @@ class ModelComparisonTrainer:
                 magnitude_weight=self.magnitude_weight,
                 frequency_weight=self.frequency_weight,
                 correlation_weight=self.correlation_weight,
-                device=self.device
+                device=self.device,
+                scaling_lr_multiplier=freq_scaling.get('scaling_lr_multiplier', 8.0),
+                scaling_wd_multiplier=freq_scaling.get('scaling_wd_multiplier', 1.0)
             )
+        
+        # 🔧 NEW: Ensure consistent normalization parameters
+        if self.normalization_params and hasattr(trainer, 'set_normalization_params'):
+            trainer.set_normalization_params(self.normalization_params)
+            self.logger.info(f"Normalization parameters synchronized for {model_name}")
         
         # Evaluate on test set
         test_metrics = trainer.evaluate(self.test_loader)
@@ -245,6 +306,36 @@ class ModelComparisonTrainer:
         self.logger.info(f"    - Device: {self.device}")
         self.logger.info("=" * 60)
 
+        # Get frequency scaling config for trainers
+        freq_scaling = self.config.get('frequency_scaling', {})
+        
+        # Get variance penalty config for trainers
+        loss_weights = self.config.get('loss_weights', {})
+        variance_penalty_weight = loss_weights.get('variance_penalty_weight', 0.05)
+        warmup_epochs = loss_weights.get('warmup_epochs', 20)
+        
+        # Create save directory for this model
+        if self.output_dir:
+            model_save_dir = Path(self.output_dir) / f"{model_name.lower().replace(' ', '_')}"
+            model_save_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create individual log file for this model
+            model_log_file = model_save_dir / f"{model_name.lower().replace(' ', '_')}_training.log"
+            model_logger = logging.getLogger(f"{__name__}.{model_name}")
+            if not model_logger.handlers:
+                file_handler = logging.FileHandler(model_log_file, mode='w')
+                formatter = logging.Formatter(
+                    "[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S"
+                )
+                file_handler.setFormatter(formatter)
+                model_logger.addHandler(file_handler)
+                model_logger.setLevel(logging.INFO)
+                self.logger.info(f"Model-specific log file created at: {model_log_file}")
+        else:
+            model_save_dir = None
+            model_logger = None
+            
         if "Attention" in model_name:
             trainer = AttentionSharedLSTMTrainer(
                 model=model,
@@ -256,8 +347,12 @@ class ModelComparisonTrainer:
                 magnitude_weight=self.magnitude_weight,
                 frequency_weight=self.frequency_weight,
                 correlation_weight=self.correlation_weight,
+                variance_penalty_weight=variance_penalty_weight,
+                warmup_epochs=warmup_epochs,
                 device=self.device,
-                save_dir=None  # No save_dir needed for comparison runs
+                save_dir=str(model_save_dir) if model_save_dir else None,
+                scaling_lr_multiplier=freq_scaling.get('scaling_lr_multiplier', 8.0),
+                scaling_wd_multiplier=freq_scaling.get('scaling_wd_multiplier', 1.0)
             )
         else:
             trainer = SharedLSTMTrainer(
@@ -270,16 +365,43 @@ class ModelComparisonTrainer:
                 magnitude_weight=self.magnitude_weight,
                 frequency_weight=self.frequency_weight,
                 correlation_weight=self.correlation_weight,
+                variance_penalty_weight=variance_penalty_weight,
+                warmup_epochs=warmup_epochs,
                 device=self.device,
-                save_dir=None  # No save_dir needed for comparison runs
+                save_dir=str(model_save_dir) if model_save_dir else None,
+                scaling_lr_multiplier=freq_scaling.get('scaling_lr_multiplier', 8.0),
+                scaling_wd_multiplier=freq_scaling.get('scaling_wd_multiplier', 1.0)
             )
 
-        # Run training (don't save checkpoints during comparison runs)
+        # Run training with saving enabled
+        save_path = None
+        if model_save_dir:
+            save_path = model_save_dir / f"{model_name.lower().replace(' ', '_')}_best_model.pth"
+            
         training_history = trainer.train(
             max_epochs=max_epochs,
-            save_path=None,
-            save_best=False
+            save_path=str(save_path) if save_path else None,
+            save_best=True
         )
 
         self.logger.info(f"Finished training {model_name}. Best val_loss: {min(training_history['val_losses']):.4f}")
+        
+        # Save training history to file
+        if model_save_dir:
+            import json
+            history_file = model_save_dir / f"{model_name.lower().replace(' ', '_')}_training_history.json"
+            with open(history_file, 'w') as f:
+                json.dump(self._convert_to_serializable(training_history), f, indent=2)
+            self.logger.info(f"Training history saved to: {history_file}")
+            
+            # Save training history plot
+            try:
+                plot_dir = model_save_dir / "training_plots"
+                plot_dir.mkdir(parents=True, exist_ok=True)
+                plot_path = plot_dir / f"{model_name.lower().replace(' ', '_')}_training_history.png"
+                trainer.plot_training_history(str(plot_path))
+                self.logger.info(f"Training history plot saved to: {plot_path}")
+            except Exception as e:
+                self.logger.warning(f"Could not save training history plot for {model_name}: {e}")
+            
         return training_history

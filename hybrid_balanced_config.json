@@ -1,0 +1,66 @@
+{
+  "name": "Enhanced Multi-Head Attention Hybrid Configuration",
+  "description": "Enhanced configuration with multi-head attention, variance penalty, and improved hyperparameters",
+  "version": "8.0",
+  "model_architecture": {
+    "input_seq_features": 12,
+    "metadata_features": 4,
+    "lookback_years": 10,
+    "lstm_hidden_1": 48,
+    "lstm_hidden_2": 24,
+    "dense_hidden": 24,
+    "dropout_rate": 0.4,
+    "freq_head_type": "linear"
+  },
+  "training_parameters": {
+    "learning_rate": 4e-4,
+    "weight_decay": 5e-5,
+    "num_epochs": 150,
+    "patience": 25,
+    "batch_size": 24,
+    "gradient_clip": 0.5,
+    "scheduler_T0": 10,
+    "scheduler_T_mult": 2
+  },
+  "loss_weights": {
+    "magnitude_weight": 1.5,
+    "frequency_weight": 2.0,
+    "correlation_weight": 0.0,
+    "variance_penalty_weight": 0.05,
+    "warmup_epochs": 20
+  },
+  "frequency_scaling": {
+    "frequency_scale_init": 2.0,
+    "frequency_bias_init": 0.5,
+    "scaling_lr_multiplier": 8,
+    "scaling_wd_multiplier": 1
+  },
+  "anti_overfitting_features": {
+    "early_stopping": true,
+    "learning_rate_scheduling": true,
+    "gradient_clipping": true,
+    "moderate_dropout": true,
+    "reduced_weight_decay": true,
+    "reduced_model_complexity": true,
+    "smaller_batch_size": true,
+    "reduced_training_epochs": true,
+    "variance_penalty": true,
+    "warmup_training": true
+  },
+  "expected_behavior": {
+    "frequency_accuracy_target": "80-95% (realistic, not collapsed)",
+    "magnitude_accuracy_target": "80-95% (realistic, not compressed)",
+    "prediction_range_target": "90-98% of target range",
+    "overfitting_indicators": "Should NOT see 100% accuracy or severe range compression",
+    "performance_balance": "Both tasks should perform realistically without collapse",
+    "attention_behavior": "Multi-head attention should show specialization and stable weights"
+  },
+  "usage_notes": [
+    "Use with: --optimized_config hybrid_balanced",
+    "This configuration uses enhanced multi-head attention with residual connections",
+    "Variance penalty activates after epoch 20 to prevent range collapse",
+    "Increased patience (25) for better convergence",
+    "Reduced learning rate (4e-4) for stability",
+    "Multi-head attention (2 heads) with LayerNorm and FFN"
+  ]
+}

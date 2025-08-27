@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Attention-Enhanced Shared LSTM Model for Earthquake Forecasting
+Multi-Head Attention-Enhanced Shared LSTM Model for Earthquake Forecasting
 
-Extends the shared LSTM with attention mechanism using the same configurations:
-- LSTM(64, return_sequences=True) -> LSTM(32, return_sequences=True) with attention
+Extends the shared LSTM with multi-head attention mechanism using the same configurations:
+- LSTM(64, return_sequences=True) -> LSTM(32, return_sequences=True) with multi-head attention (2 heads)
 - Concatenation with bin metadata features
 - Dual output heads: max magnitude (continuous) and frequency (log-frequency)
 - Weighted loss combining MSE (magnitude) and MSE (log-frequency)
 - Same configurable loss weights alpha=2.0, beta=1.0, gamma=0.0
 - Identical frequency head architecture and scaling parameters
+- Enhanced attention with learnable Q, K, V projections and scaled dot-product attention
 """
 
 import torch
@@ -20,39 +21,69 @@ import logging
 from .shared_lstm_model import WeightedEarthquakeLoss  # Use the same refactored loss function
 
 
-class SimpleWeightedAttention(nn.Module):
+class MultiHeadAttention(nn.Module):
     """
-    Extremely simple attention: just learnable weights for each timestep.
-    No complex projections, no multi-head complexity - just weights that sum to 1.
+    Multi-head attention mechanism with 2 attention heads.
+    Implements scaled dot-product attention with learnable projections.
     """
     
-    def __init__(self, seq_length: int = 10):
-        super(SimpleWeightedAttention, self).__init__()
-        self.seq_length = seq_length
+    def __init__(self, embed_dim: int = 32, num_heads: int = 2, dropout: float = 0.1):
+        super(MultiHeadAttention, self).__init__()
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
         
-        # Learnable weights for each timestep (initialize to uniform)
-        self.timestep_weights = nn.Parameter(torch.ones(seq_length) / seq_length)
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        
+        # Linear projections for Q, K, V
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        
+        # Output projection
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Apply learned weights to each timestep.
+        Apply multi-head attention.
         
         Args:
             x: Input tensor of shape (batch_size, seq_len, embed_dim)
             
         Returns:
-            Weighted output tensor
+            Attended output tensor
         """
         batch_size, seq_len, embed_dim = x.shape
         
-        # Ensure weights sum to 1 (softmax for stability)
-        weights = F.softmax(self.timestep_weights, dim=0)
+        # Project Q, K, V
+        q = self.q_proj(x)  # (batch_size, seq_len, embed_dim)
+        k = self.k_proj(x)  # (batch_size, seq_len, embed_dim)
+        v = self.v_proj(x)  # (batch_size, seq_len, embed_dim)
         
-        # Apply weights to each timestep
-        # Shape: (batch_size, seq_len, embed_dim)
-        weighted_output = x * weights.unsqueeze(0).unsqueeze(-1)
+        # Reshape for multi-head attention
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         
-        return weighted_output
+        # Compute attention scores
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (batch_size, num_heads, seq_len, seq_len)
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, v)  # (batch_size, num_heads, seq_len, head_dim)
+        
+        # Reshape back
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, embed_dim)
+        
+        # Final projection
+        output = self.out_proj(attn_output)
+        
+        return output
 
 
 class AttentionSharedLSTMModel(nn.Module):
@@ -68,7 +99,9 @@ class AttentionSharedLSTMModel(nn.Module):
                  lstm_hidden_2: int = 32,  # FIXED: Match shared LSTM (32, not 64)
                  dense_hidden: int = 32,
                  dropout_rate: float = 0.25,
-                 freq_head_type: str = "linear"):
+                 freq_head_type: str = "linear",
+                 frequency_scale_init: float = 2.0,
+                 frequency_bias_init: float = 0.5):
         super(AttentionSharedLSTMModel, self).__init__()
         
         self.input_seq_features = input_seq_features
@@ -79,6 +112,8 @@ class AttentionSharedLSTMModel(nn.Module):
         self.dense_hidden = dense_hidden
         self.dropout_rate = dropout_rate
         self.freq_head_type = freq_head_type
+        self.frequency_scale_init = frequency_scale_init
+        self.frequency_bias_init = frequency_bias_init
         
         # LSTM layers for sequential features - EXACTLY like shared LSTM
         self.lstm1 = nn.LSTM(
@@ -93,9 +128,22 @@ class AttentionSharedLSTMModel(nn.Module):
             batch_first=True
         )
         
-        # Attention mechanism over the sequence
-        self.attention = SimpleWeightedAttention(
-            seq_length=lookback_years
+        # Multi-head attention mechanism over the sequence
+        self.attention = MultiHeadAttention(
+            embed_dim=lstm_hidden_2,
+            num_heads=2,
+            dropout=dropout_rate * 0.5
+        )
+        
+        # Layer normalization for attention output
+        self.layer_norm = nn.LayerNorm(lstm_hidden_2)
+        
+        # Lightweight FeedForward Network after attention
+        self.ffn = nn.Sequential(
+            nn.Linear(lstm_hidden_2, lstm_hidden_2 * 2),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate * 0.3),
+            nn.Linear(lstm_hidden_2 * 2, lstm_hidden_2)
         )
         
         # Feature concatenation layer - EXACTLY like shared LSTM
@@ -142,8 +190,8 @@ class AttentionSharedLSTMModel(nn.Module):
                 nn.Linear(8, 1)    # Output layer
             )
             # FIX: Add learnable scaling parameters for linear mode to prevent prediction collapse
-            self.frequency_scale = nn.Parameter(torch.tensor(1.0))
-            self.frequency_bias = nn.Parameter(torch.tensor(0.0))
+            self.frequency_scale = nn.Parameter(torch.tensor(frequency_scale_init))
+            self.frequency_bias = nn.Parameter(torch.tensor(frequency_bias_init))
         else:
             # Legacy scaled mode (kept for comparison)
             self.frequency_head = nn.Sequential(
@@ -163,8 +211,8 @@ class AttentionSharedLSTMModel(nn.Module):
                 nn.Identity()  # No activation - let the model learn the full range
             )
             # Learnable scaling parameters for scaled mode
-            self.frequency_scale = nn.Parameter(torch.tensor(1.0))
-            self.frequency_bias = nn.Parameter(torch.tensor(0.0))
+            self.frequency_scale = nn.Parameter(torch.tensor(frequency_scale_init))
+            self.frequency_bias = nn.Parameter(torch.tensor(frequency_bias_init))
         
         # FIX: Create logger before calling _init_weights to avoid AttributeError
         self.logger = logging.getLogger(__name__)
@@ -172,7 +220,8 @@ class AttentionSharedLSTMModel(nn.Module):
         # Initialize weights
         self._init_weights()
         
-        self.logger.info(f"AttentionSharedLSTMModel initialized with {sum(p.numel() for p in self.parameters())} parameters")
+        total_params = sum(p.numel() for p in self.parameters())
+        self.logger.info(f"AttentionSharedLSTMModel initialized with {total_params} parameters")
         self.logger.info(f"[REFACTORING] Frequency head type: {freq_head_type}")
         if freq_head_type == "linear":
             self.logger.info("  - Linear frequency head: direct log-frequency prediction")
@@ -183,7 +232,14 @@ class AttentionSharedLSTMModel(nn.Module):
             self.logger.info("  - Legacy mode for comparison")
         self.logger.info("  - Magnitude head: Linear output (no activation)")
         self.logger.info("  - Deeper MLP funnel: 120 -> 90 -> 30 -> 30 -> 1")
-        self.logger.info("  - Attention mechanism: Simple learnable timestep weights")
+        self.logger.info("  - Attention mechanism: Multi-head attention (2 heads) with residual connections")
+        self.logger.info("  - Post-attention: LayerNorm + FeedForward Network (64->32) with residual connections")
+    
+    def set_normalization_params(self, params: dict):
+        """Set normalization parameters for consistency across evaluations."""
+        # Store normalization parameters for potential use in forward pass
+        self.normalization_params = params
+        self.logger.info("Normalization parameters set for consistency")
     
     def _init_weights(self):
         """Initialize model weights using Xavier initialization."""
@@ -199,18 +255,24 @@ class AttentionSharedLSTMModel(nn.Module):
                     elif 'bias' in name:
                         nn.init.zeros_(param)
         
+        # Initialize attention mechanism weights
+        if hasattr(self, 'attention'):
+            for module in self.attention.modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.xavier_uniform_(module.weight)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+        
         # FIX: Initialize frequency scaling parameters for better training stability
         if hasattr(self, 'frequency_scale') and self.frequency_scale is not None:
-            # IMPROVED: Initialize scale to a much larger value to encourage wider prediction ranges
-            # Start with scale=10.0 instead of 5.0 to help model learn much broader frequency distributions
-            nn.init.constant_(self.frequency_scale, 10.0)
-            self.logger.info("  - Frequency scale initialized to 10.0 (very aggressive initialization)")
+            # Use the values passed to constructor
+            nn.init.constant_(self.frequency_scale, self.frequency_scale_init)
+            self.logger.info(f"  - Frequency scale initialized to {self.frequency_scale_init} (config-driven initialization)")
         
         if hasattr(self, 'frequency_bias') and self.frequency_bias is not None:
-            # IMPROVED: Initialize bias to a larger positive value to shift predictions up
-            # Start with bias=2.0 instead of 1.0 to help model learn higher frequency values
-            nn.init.constant_(self.frequency_bias, 2.0)
-            self.logger.info("  - Frequency bias initialized to 2.0 (very aggressive initialization)")
+            # Use the values passed to constructor
+            nn.init.constant_(self.frequency_bias, self.frequency_bias_init)
+            self.logger.info(f"  - Frequency bias initialized to {self.frequency_bias_init} (config-driven initialization)")
     
     def forward(self, 
                 input_sequence: torch.Tensor, 
@@ -231,16 +293,17 @@ class AttentionSharedLSTMModel(nn.Module):
         lstm_out, _ = self.lstm1(input_sequence)
         lstm_out, (hidden, cell) = self.lstm2(lstm_out)
         
-        # Apply simple weighted attention over the sequence
-        attended_seq = self.attention(lstm_out)
+        # Apply multi-head attention over the sequence with residual connection
+        attended_seq = self.attention(lstm_out) + lstm_out  # Residual connection
         
-        # Debug: Log attention weights during training
-        if self.training:
-            weights = F.softmax(self.attention.timestep_weights, dim=0)
-            self.logger.info(f"DEBUG: Attention weights: {weights.detach().cpu().numpy()}")
+        # Apply LayerNorm after residual connection
+        attended_seq = self.layer_norm(attended_seq)
+        
+        # Apply FeedForward Network with residual connection
+        ffn_out = self.ffn(attended_seq) + attended_seq  # Residual connection
         
         # Take the last hidden state - EXACTLY like shared LSTM
-        lstm_final = attended_seq[:, -1, :]  # (batch_size, lstm_hidden_2)
+        lstm_final = ffn_out[:, -1, :]  # (batch_size, lstm_hidden_2)
         
         # Concatenate LSTM output with metadata - EXACTLY like shared LSTM
         combined = torch.cat([lstm_final, metadata], dim=1)

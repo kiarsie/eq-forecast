@@ -47,8 +47,19 @@ def create_optimized_model(model_class, config: dict, **kwargs):
         'freq_head_type': config['model_architecture']['freq_head_type']
     }
     
-    # Add any additional kwargs
-    model_params.update(kwargs)
+    # FIX: Filter kwargs to only include parameters that the model constructor accepts
+    import inspect
+    model_sig = inspect.signature(model_class.__init__)
+    valid_params = {k: v for k, v in kwargs.items() if k in model_sig.parameters}
+    
+    if valid_params:
+        print(f"  Using additional parameters: {list(valid_params.keys())}")
+        model_params.update(valid_params)
+    
+    # Log any ignored parameters
+    ignored_params = {k: v for k, v in kwargs.items() if k not in model_sig.parameters}
+    if ignored_params:
+        print(f"  Ignoring non-model parameters: {list(ignored_params.keys())}")
     
     # Create model
     model = model_class(**model_params)
@@ -72,18 +83,23 @@ def get_training_params(config: dict) -> dict:
 
 def get_all_training_params(config: dict) -> dict:
     """Extract all training parameters from config (for individual model training)."""
+    training_params = config.get('training_parameters', {})
+    loss_weights = config.get('loss_weights', {})
+    
     return {
-        'learning_rate': config['training_parameters']['learning_rate'],
-        'weight_decay': config['training_parameters']['weight_decay'],
-        'num_epochs': config['training_parameters']['num_epochs'],
-        'patience': config['training_parameters']['patience'],
-        'batch_size': config['training_parameters']['batch_size'],
-        'gradient_clip': config['training_parameters']['gradient_clip'],
-        'scheduler_T0': config['training_parameters']['scheduler_T0'],
-        'scheduler_T_mult': config['training_parameters']['scheduler_T_mult'],
-        'magnitude_weight': config['loss_weights']['magnitude_weight'],
-        'frequency_weight': config['loss_weights']['frequency_weight'],
-        'correlation_weight': config['loss_weights']['correlation_weight']
+        'learning_rate': training_params.get('learning_rate', 5e-4),
+        'weight_decay': training_params.get('weight_decay', 1e-4),
+        'num_epochs': training_params.get('num_epochs', 300),
+        'patience': training_params.get('patience', 15),
+        'batch_size': training_params.get('batch_size', 16),
+        'gradient_clip': training_params.get('gradient_clip', 1.0),
+        'scheduler_T0': training_params.get('scheduler_T0', 15),
+        'scheduler_T_mult': training_params.get('scheduler_T_mult', 2),
+        'magnitude_weight': loss_weights.get('magnitude_weight', 2.0),
+        'frequency_weight': loss_weights.get('frequency_weight', 1.0),
+        'correlation_weight': loss_weights.get('correlation_weight', 0.0),
+        'variance_penalty_weight': loss_weights.get('variance_penalty_weight', 0.0),
+        'warmup_epochs': loss_weights.get('warmup_epochs', 0)
     }
 
 def main():

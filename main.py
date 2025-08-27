@@ -80,8 +80,9 @@ def load_optimized_config(config_name: str = "best_frequency") -> Optional[Dict]
         "best_frequency": "best_frequency_config.json",
         "best_magnitude": "best_magnitude_config.json", 
         "best_balanced": "best_balanced_config.json",
-        "anti_overfitting": "anti_overfitting_config.json",
-        "balanced_anti_overfitting": "balanced_anti_overfitting_config.json",
+            "anti_overfitting": "anti_overfitting_config.json",
+    "balanced_anti_overfitting": "balanced_anti_overfitting_config.json",
+    "hybrid_balanced": "hybrid_balanced_config.json",
         "enhanced_frequency_scaling": "enhanced_frequency_scaling_config.json",
         "high_performance_balanced": "high_performance_balanced_config.json"
     }
@@ -200,116 +201,73 @@ def preprocess_earthquake_data(input_path: str, output_path: str, logger: loggin
         raise
 
 
-def create_shared_lstm_datasets(data_path: str, 
-                                lookback_years: int = 10,
-                                target_horizon: int = 1,
-                                train_end_year: int = 2009,
-                                val_end_year: int = 2017,
-                                test_end_year: int = 2025,
-                                logger: logging.Logger = None) -> Dict:
-    """
-    Create shared LSTM datasets for training, validation, and testing.
+def create_shared_lstm_datasets(data_path: str, lookback_years: int = 10, target_horizon: int = 1):
+    """Create datasets for shared LSTM training."""
+    # Get logger from the current context
+    logger = logging.getLogger(__name__)
+    logger.info("Creating shared LSTM datasets...")
     
-    Args:
-        data_path: Path to processed earthquake data
-        lookback_years: Number of years to look back
-        target_horizon: Number of years to predict ahead
-        train_end_year: Last year for training data
-        val_end_year: Last year for validation data
-        test_end_year: Last year for test data
-        logger: Logger instance
-        
-    Returns:
-        Dictionary containing datasets and data loaders
-    """
-    if logger:
-        logger.info("Creating shared LSTM datasets...")
-        logger.info(f"Data path: {data_path}")
-        logger.info(f"Lookback years: {lookback_years}")
-        logger.info(f"Target horizon: {target_horizon}")
-        logger.info(f"Time split: Train<={train_end_year}, Val{val_end_year-2009}-{val_end_year}, Test{val_end_year+1}-{test_end_year}")
+    # Create the enhanced shared dataset
+    dataset = EnhancedSharedDataset(
+        data_path=data_path,
+        lookback_years=lookback_years,
+        target_horizon=target_horizon,
+        normalize=True,
+        rolling_windows=[3, 5, 10],
+        train_end_year=2009,
+        val_end_year=2017,
+        test_end_year=2025
+    )
     
-    try:
-        # Create the enhanced shared dataset
-        dataset = EnhancedSharedDataset(
-            data_path=data_path,
-            lookback_years=lookback_years,
-            target_horizon=target_horizon,
-            normalize=True,
-            rolling_windows=[3, 5, 10],
-            train_end_year=train_end_year,
-            val_end_year=val_end_year,
-            test_end_year=test_end_year
-        )
-        
-        # Get feature dimensions
-        input_features, target_features, metadata_features = dataset.get_feature_dimensions()
-        
-        if logger:
-            logger.info(f"Feature dimensions: Input={input_features}, Target={target_features}, Metadata={metadata_features}")
-        
-        # Create data loaders for each split
-        train_sequences = dataset.get_split_sequences('train')
-        val_sequences = dataset.get_split_sequences('val')
-        test_sequences = dataset.get_split_sequences('test')
-        
-        if logger:
-            logger.info(f"Dataset splits: Train={len(train_sequences)}, Val={len(val_sequences)}, Test={len(test_sequences)}")
-        
-        # Create data loaders using the working approach (like your initial setup)
-        train_loader = torch.utils.data.DataLoader(
-            dataset, 
-            batch_size=16,  # Use your working batch size
-            sampler=torch.utils.data.SubsetRandomSampler(
-                [i for i, seq in enumerate(dataset.sequences) if seq['split'] == 'train']
-            ),
-            shuffle=False,  # Sampler handles shuffling
-            num_workers=0,
-            pin_memory=True
-        )
-        
-        val_loader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=16,  # Use your working batch size
-            sampler=torch.utils.data.SubsetRandomSampler(
-                [i for i, seq in enumerate(dataset.sequences) if seq['split'] == 'val']
-            ),
-            shuffle=False,  # Sampler handles shuffling
-            num_workers=0,
-            pin_memory=True
-        )
-        
-        test_loader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=16,  # Use your working batch size
-            sampler=torch.utils.data.SubsetRandomSampler(
-                [i for i, seq in enumerate(dataset.sequences) if seq['split'] == 'test']
-            ),
-            shuffle=False,  # Sampler handles shuffling
-            num_workers=0,
-            pin_memory=True
-        )
-        
-        return {
-            'dataset': dataset,
-            'train_loader': train_loader,
-            'val_loader': val_loader,
-            'test_loader': test_loader,
-            'input_features': input_features,
-            'target_features': target_features,
-            'metadata_features': metadata_features,
-            'train_sequences': len(train_sequences),
-            'val_sequences': len(val_sequences),
-            'test_sequences': len(test_sequences)
-        }
-        
-    except Exception as e:
-        if logger:
-            logger.error(f"Error creating datasets: {e}")
-        raise
-
-
-
+    # Get feature dimensions
+    input_features, target_features, metadata_features = dataset.get_feature_dimensions()
+    logger.info(f"Feature dimensions: Input={input_features}, Target={target_features}, Metadata={metadata_features}")
+    
+    # Create data loaders
+    train_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=16,
+        sampler=torch.utils.data.SubsetRandomSampler(
+            [i for i, seq in enumerate(dataset.sequences) if seq['split'] == 'train']
+        ),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False
+    )
+    
+    val_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=16,
+        sampler=torch.utils.data.SubsetRandomSampler(
+            [i for i, seq in enumerate(dataset.sequences) if seq['split'] == 'val']
+        ),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False
+    )
+    
+    test_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=16,
+        sampler=torch.utils.data.SubsetRandomSampler(
+            [i for i, seq in enumerate(dataset.sequences) if seq['split'] == 'test']
+        ),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False
+    )
+    
+    logger.info(f"Created data loaders: Train={len(train_loader.dataset)}, Val={len(val_loader.dataset)}, Test={len(test_loader.dataset)}")
+    
+    return {
+        'dataset': dataset,
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'input_features': input_features,
+        'target_features': target_features,
+        'metadata_features': metadata_features
+    }
 
 
 def create_shared_lstm_model(input_features: int, 
@@ -1338,8 +1296,8 @@ def main():
         '--optimized_config',
         type=str,
         default=None,
-        choices=['best_frequency', 'best_magnitude', 'best_balanced', 'anti_overfitting', 'balanced_anti_overfitting', 'enhanced_frequency_scaling', 'high_performance_balanced'],
-        help='Use optimized hyperparameter configuration for best performance. Options: best_frequency (49.39 range), best_magnitude (1.52 range), best_balanced (balanced performance), anti_overfitting (prevents overfitting), balanced_anti_overfitting (balanced performance and capacity), enhanced_frequency_scaling (maximum range coverage), high_performance_balanced (maximum overall performance)'
+        choices=['best_frequency', 'best_magnitude', 'best_balanced', 'anti_overfitting', 'balanced_anti_overfitting', 'enhanced_frequency_scaling', 'high_performance_balanced', 'hybrid_balanced'],
+        help='Use optimized hyperparameter configuration for best performance. Options: best_frequency (49.39 range), best_magnitude (1.52 range), best_balanced (balanced performance), anti_overfitting (prevents overfitting), balanced_anti_overfitting (balanced performance and capacity), enhanced_frequency_scaling (maximum range coverage), high_performance_balanced (maximum overall performance), hybrid_balanced (anti-overfitting magnitude + high-performance frequency)'
     )
     
     args = parser.parse_args()

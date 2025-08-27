@@ -309,6 +309,7 @@ class NonOverlappingQuadtreeBinner:
             width = max_lon - min_lon
             height = max_lat - min_lat
             print(f"Bin {i}: {width:.2f}° lon x {height:.2f}° lat, {count} events")
+            print(f"      Coordinates: lon[{min_lon:.12f}, {max_lon:.12f}], lat[{min_lat:.12f}, {max_lat:.12f}]")
         
         # Assign bin IDs
         print(f"\nAssigning earthquakes to {len(bounds)} non-overlapping bins:")
@@ -321,6 +322,7 @@ class NonOverlappingQuadtreeBinner:
             count = np.sum(mask)
             bin_ids[mask] = bin_id
             print(f"  Bin {bin_id}: {count} earthquakes")
+            print(f"      Coordinates: lon[{min_lon:.12f}, {max_lon:.12f}], lat[{min_lat:.12f}, {max_lat:.12f}]")
         
         # Check for unassigned earthquakes
         unassigned = np.sum(bin_ids == -1)

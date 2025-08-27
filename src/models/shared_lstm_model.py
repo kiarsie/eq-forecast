@@ -30,7 +30,9 @@ class SharedLSTMModel(nn.Module):
                  lstm_hidden_2: int = 64,
                  dense_hidden: int = 32,
                  dropout_rate: float = 0.25,
-                 freq_head_type: str = "linear"):
+                 freq_head_type: str = "linear",
+                 frequency_scale_init: float = 2.0,
+                 frequency_bias_init: float = 0.5):
         super(SharedLSTMModel, self).__init__()
         
         self.input_seq_features = input_seq_features
@@ -41,6 +43,8 @@ class SharedLSTMModel(nn.Module):
         self.dense_hidden = dense_hidden
         self.dropout_rate = dropout_rate
         self.freq_head_type = freq_head_type
+        self.frequency_scale_init = frequency_scale_init
+        self.frequency_bias_init = frequency_bias_init
         
         # LSTM layers for sequential features
         self.lstm1 = nn.LSTM(
@@ -99,8 +103,8 @@ class SharedLSTMModel(nn.Module):
                 nn.Linear(8, 1)    # NEW: Output layer
             )
             # FIX: Add learnable scaling parameters for linear mode to prevent prediction collapse
-            self.frequency_scale = nn.Parameter(torch.tensor(1.0))
-            self.frequency_bias = nn.Parameter(torch.tensor(0.0))
+            self.frequency_scale = nn.Parameter(torch.tensor(frequency_scale_init))
+            self.frequency_bias = nn.Parameter(torch.tensor(frequency_bias_init))
         else:
             # Legacy scaled mode (kept for comparison)
             self.frequency_head = nn.Sequential(
@@ -120,8 +124,8 @@ class SharedLSTMModel(nn.Module):
                 nn.Identity()  # No activation - let the model learn the full range
             )
             # Learnable scaling parameters for scaled mode
-            self.frequency_scale = nn.Parameter(torch.tensor(1.0))
-            self.frequency_bias = nn.Parameter(torch.tensor(0.0))
+            self.frequency_scale = nn.Parameter(torch.tensor(frequency_scale_init))
+            self.frequency_bias = nn.Parameter(torch.tensor(frequency_bias_init))
         
         # FIX: Create logger before calling _init_weights to avoid AttributeError
         self.logger = logging.getLogger(__name__)
@@ -129,7 +133,8 @@ class SharedLSTMModel(nn.Module):
         # Initialize weights
         self._init_weights()
         
-        self.logger.info(f"SharedLSTMModel initialized with {sum(p.numel() for p in self.parameters())} parameters")
+        total_params = sum(p.numel() for p in self.parameters())
+        self.logger.info(f"SharedLSTMModel initialized with {total_params} parameters")
         self.logger.info(f"[REFACTORING] Frequency head type: {freq_head_type}")
         if freq_head_type == "linear":
             self.logger.info("  - Linear frequency head: direct log-frequency prediction")
@@ -140,6 +145,12 @@ class SharedLSTMModel(nn.Module):
             self.logger.info("  - Legacy mode for comparison")
         self.logger.info("  - Magnitude head: Linear output (no activation)")
         self.logger.info("  - Deeper MLP funnel: 120 -> 90 -> 30 -> 30 -> 1")
+    
+    def set_normalization_params(self, params: dict):
+        """Set normalization parameters for consistency across evaluations."""
+        # Store normalization parameters for potential use in forward pass
+        self.normalization_params = params
+        self.logger.info("Normalization parameters set for consistency")
     
     def _init_weights(self):
         """Initialize model weights using Xavier initialization."""
@@ -157,16 +168,14 @@ class SharedLSTMModel(nn.Module):
         
         # FIX: Initialize frequency scaling parameters for better training stability
         if hasattr(self, 'frequency_scale') and self.frequency_scale is not None:
-            # IMPROVED: Initialize scale to a much larger value to encourage wider prediction ranges
-            # Start with scale=10.0 instead of 5.0 to help model learn much broader frequency distributions
-            nn.init.constant_(self.frequency_scale, 10.0)
-            self.logger.info("  - Frequency scale initialized to 10.0 (very aggressive initialization)")
+            # Use the values passed to constructor
+            nn.init.constant_(self.frequency_scale, self.frequency_scale_init)
+            self.logger.info(f"  - Frequency scale initialized to {self.frequency_scale_init} (config-driven initialization)")
         
         if hasattr(self, 'frequency_bias') and self.frequency_bias is not None:
-            # IMPROVED: Initialize bias to a larger positive value to shift predictions up
-            # Start with bias=2.0 instead of 1.0 to help model learn higher frequency values
-            nn.init.constant_(self.frequency_bias, 2.0)
-            self.logger.info("  - Frequency bias initialized to 2.0 (very aggressive initialization)")
+            # Use the values passed to constructor
+            nn.init.constant_(self.frequency_bias, self.frequency_bias_init)
+            self.logger.info(f"  - Frequency bias initialized to {self.frequency_bias_init} (config-driven initialization)")
     
     def forward(self, 
                 input_sequence: torch.Tensor, 
@@ -256,27 +265,30 @@ class WeightedEarthquakeLoss(nn.Module):
                  magnitude_weight: float = 2.0,      # alpha: weight for magnitude loss (increased)
                  frequency_weight: float = 1.0,      # beta: weight for frequency loss (increased from 0.5)
                  correlation_weight: float = 0.0,    # gamma: weight for correlation penalty (disabled)
-                 dynamic_beta: bool = False):        # Disable dynamic beta adjustment
+                 dynamic_beta: bool = False,         # Disable dynamic beta adjustment
+                 variance_penalty_weight: float = 0.05,  # Weight for variance penalty
+                 warmup_epochs: int = 20):           # Epochs before activating variance penalty
         super(WeightedEarthquakeLoss, self).__init__()
         
         self.magnitude_weight = magnitude_weight      # alpha
         self.frequency_weight = frequency_weight      # beta
         self.correlation_weight = correlation_weight  # gamma
         self.dynamic_beta = dynamic_beta              # Disabled
+        self.variance_penalty_weight = variance_penalty_weight
+        self.warmup_epochs = warmup_epochs
         
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"WeightedEarthquakeLoss: alpha(magnitude)={magnitude_weight}, beta(frequency)={frequency_weight}, gamma(correlation)={correlation_weight}")
-        self.logger.info("[REFACTORING] APPLIED:")
-        self.logger.info("  - Rebalanced loss weights: alpha=2.0, beta=1.0, gamma=0.0")
         self.logger.info("  - Frequency targets preprocessed with log1p")
         self.logger.info("  - Direct MSE comparison in log-space")
-        self.logger.info("  - Total Loss = alpha*MSE + beta*MSE (log1p frequency)")
+        self.logger.info(f"  - Total Loss = alpha*MSE + beta*MSE (log1p frequency) + variance penalty (after epoch {warmup_epochs})")
     
     def forward(self, 
                 magnitude_pred: torch.Tensor, 
                 frequency_pred: torch.Tensor,
                 magnitude_true: torch.Tensor, 
-                frequency_true: torch.Tensor) -> torch.Tensor:
+                frequency_true: torch.Tensor,
+                epoch: int = 0) -> torch.Tensor:
         """
         Compute the weighted loss with log1p preprocessing for frequency.
         
@@ -302,14 +314,22 @@ class WeightedEarthquakeLoss(nn.Module):
         freq_range_penalty = torch.exp(-torch.std(frequency_pred))  # Penalize narrow ranges
         mag_range_penalty = torch.exp(-torch.std(magnitude_pred))   # Penalize narrow magnitude ranges
         
+        # ADD: Variance penalty term (activated after warmup)
+        variance_penalty = 0.0
+        if epoch >= self.warmup_epochs:
+            mag_variance_penalty = torch.abs(torch.std(magnitude_pred) - torch.std(magnitude_true))
+            freq_variance_penalty = torch.abs(torch.std(frequency_pred) - torch.std(frequency_true_log1p))
+            variance_penalty = mag_variance_penalty + freq_variance_penalty
+        
         # Compute weighted loss
         frequency_loss = F.mse_loss(frequency_pred, frequency_true_log1p)
         
-        # Total loss with range expansion penalties
+        # Total loss with range expansion penalties and variance penalty
         total_loss = (self.magnitude_weight * magnitude_loss + 
                      self.frequency_weight * frequency_loss + 
                      0.1 * freq_range_penalty +  # Range penalty for frequency
-                     0.1 * mag_range_penalty)    # Range penalty for magnitude
+                     0.1 * mag_range_penalty +   # Range penalty for magnitude
+                     self.variance_penalty_weight * variance_penalty)  # Variance penalty
         
         return total_loss
     

@@ -10,13 +10,13 @@ CRITICAL FIXES APPLIED TO FIX PREDICTION COLLAPSE:
    - All models now use identical settings
 
 2. ✅ AGGRESSIVE SCALING INITIALIZATION:
-   - frequency_scale: 5.0 → 10.0 (very aggressive)
-   - frequency_bias: 1.0 → 2.0 (very aggressive)
+   - frequency_scale: 5.0 -> 10.0 (very aggressive)
+   - frequency_bias: 1.0 -> 2.0 (very aggressive)
    - Applied to both shared_lstm and attention_lstm models
 
 3. ✅ ENHANCED LEARNING RATES:
-   - Scaling parameters: 10x → 20x main learning rate
-   - Weight decay: 2x → 3x main weight decay
+   - Scaling parameters: 10x -> 20x main learning rate
+   - Weight decay: 2x -> 3x main weight decay
    - More aggressive parameter updates
 
 4. ✅ RANGE EXPANSION PENALTIES:
@@ -79,18 +79,23 @@ class SharedLSTMTrainer:
                  model: SharedLSTMModel,
                  train_loader: DataLoader,
                  val_loader: DataLoader,
-                 test_loader: DataLoader,
-                 learning_rate: float = 5e-4,
-                 weight_decay: float = 1e-4,
-                 magnitude_weight: float = 2.0,      # alpha: weight for magnitude loss (increased)
-                 frequency_weight: float = 1.0,      # beta: weight for frequency loss (increased from 0.5)
-                 correlation_weight: float = 0.0,    # gamma: weight for correlation penalty (disabled)
+                 test_loader: DataLoader = None,
+                 learning_rate: float = 4e-4,      # Updated: was 5e-4, now 4e-4 for better performance
+                 weight_decay: float = 5e-5,       # Updated: was 1e-4, now 5e-5 for better performance
+                 magnitude_weight: float = 1.5,    # Updated: was 2.0, now 1.5 for better balance
+                 frequency_weight: float = 2.0,    # Updated: was 1.0, now 2.0 for better frequency prediction
+                 correlation_weight: float = 0.0,  # gamma: weight for correlation penalty (disabled)
+                 variance_penalty_weight: float = 0.05,  # Weight for variance penalty
+                 warmup_epochs: int = 20,              # Epochs before activating variance penalty
                  device: str = 'auto',
-                 save_dir: str = None):
+                 save_dir: str = None,
+                 scaling_lr_multiplier: float = 8.0,
+                 scaling_wd_multiplier: float = 1.0):
         """
         Initialize the trainer.
         
-        REFACTOR: Updated loss weights to α=2.0, β=1.0, γ=0.0 to address prediction collapse.
+        REFACTOR: Updated loss weights to alpha=1.5, beta=2.0, gamma=0.0 for better performance.
+        Based on successful previous run with these hyperparameters.
         """
         # FIX: Create logger first to avoid AttributeError
         self.logger = logging.getLogger(__name__)
@@ -104,7 +109,11 @@ class SharedLSTMTrainer:
         self.magnitude_weight = magnitude_weight      # alpha
         self.frequency_weight = frequency_weight      # beta
         self.correlation_weight = correlation_weight  # gamma
+        self.variance_penalty_weight = variance_penalty_weight
+        self.warmup_epochs = warmup_epochs
         self.save_dir = save_dir
+        self.scaling_lr_multiplier = scaling_lr_multiplier
+        self.scaling_wd_multiplier = scaling_wd_multiplier
         
         # Device setup
         if device == 'auto':
@@ -118,7 +127,9 @@ class SharedLSTMTrainer:
         self.criterion = WeightedEarthquakeLoss(
             magnitude_weight=magnitude_weight,
             frequency_weight=frequency_weight,
-            correlation_weight=correlation_weight
+            correlation_weight=correlation_weight,
+            variance_penalty_weight=self.variance_penalty_weight,  # Use stored parameter
+            warmup_epochs=self.warmup_epochs                      # Use stored parameter
         )
         
         # 🔧 NEW: Create separate parameter groups for different learning rates
@@ -135,11 +146,11 @@ class SharedLSTMTrainer:
         # Create optimizer with different learning rates
         self.optimizer = optim.Adam([
             {'params': main_params, 'lr': learning_rate, 'weight_decay': weight_decay},
-            {'params': scaling_params, 'lr': learning_rate * 20.0, 'weight_decay': weight_decay * 3.0}  # INCREASED: From 10x to 20x LR, from 2x to 3x WD
+            {'params': scaling_params, 'lr': learning_rate * self.scaling_lr_multiplier, 'weight_decay': weight_decay * self.scaling_wd_multiplier}
         ])
         
         self.logger.info(f"  - Main parameters: LR={learning_rate}, Weight decay={weight_decay}")
-        self.logger.info(f"  - Frequency scaling parameters: LR={learning_rate * 20.0}, Weight decay={weight_decay * 3.0}")
+        self.logger.info(f"  - Frequency scaling parameters: LR={learning_rate * self.scaling_lr_multiplier}, Weight decay={weight_decay * self.scaling_wd_multiplier}")
         
         # NEW: Monitor scaling parameters during training
         self.scaling_monitor = {
@@ -152,18 +163,10 @@ class SharedLSTMTrainer:
         # 🔧 REFACTOR: Keep gradient clipping at 0.5 for stability
         self.max_grad_norm = 0.5
         
-        # REFACTOR: Keep CosineAnnealingWarmRestarts scheduler
+        # Enhanced learning rate scheduling for better adaptation
         self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
             self.optimizer,
-            T_0=10,
-            T_mult=2,
-            eta_min=1e-6
-        )
-        
-        # NEW: Enhanced learning rate scheduling for better adaptation
-        self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            self.optimizer,
-            T_0=15,  # Increased from 10 to 15 for more stable learning
+            T_0=10,  # Use config value for consistency
             T_mult=2,
             eta_min=1e-7  # Lower minimum LR for better fine-tuning
         )
@@ -188,24 +191,30 @@ class SharedLSTMTrainer:
         
         # Early stopping
         self.best_val_loss = float('inf')
-        self.patience = 15  # FIXED: Changed from 25 to 15 for consistency
+        self.patience = 25  # ENHANCED: Increased to 25 for better convergence
         self.patience_counter = 0
         
         self.logger.info(f"SharedLSTMTrainer initialized on {self.device}")
         self.logger.info(f"Learning rate: {learning_rate}, Weight decay: {weight_decay}")
         self.logger.info(f"Loss weights: alpha(magnitude)={magnitude_weight}, beta(frequency)={frequency_weight}, gamma(correlation)={correlation_weight}")
+        self.logger.info(f"Variance penalty: weight={self.variance_penalty_weight}, warmup_epochs={self.warmup_epochs}")
         self.logger.info(f"Early stopping patience: {self.patience}")
-        self.logger.info("CosineAnnealingWarmRestarts scheduler enabled (T_0=15, T_mult=2)")
-        self.logger.info("[REFACTORING] APPLIED:")
-        self.logger.info("  - Rebalanced loss weights: alpha=2.0, beta=1.0, gamma=0.0")
-        self.logger.info("  - Removed log/exp transform from frequency loss")
+        self.logger.info("CosineAnnealingWarmRestarts scheduler enabled (T_0=10, T_mult=2)")
         self.logger.info("  - Frequency targets preprocessed with log1p")
         self.logger.info("  - Gradient clipping at 0.5")
         self.logger.info("  - Enhanced debug logging for prediction ranges")
-        self.logger.info("  - INCREASED scaling parameter learning rate: 20x main LR")
-        self.logger.info("  - INCREASED scaling parameter weight decay: 3x main WD")
-        self.logger.info("  - AGGRESSIVE scaling initialization: scale=10.0, bias=2.0")
+        self.logger.info(f"  - Config-driven scaling parameter learning rate: {self.scaling_lr_multiplier}x main LR")
+        self.logger.info(f"  - Config-driven scaling parameter weight decay: {self.scaling_wd_multiplier}x main WD")
+        self.logger.info(f"  - Config-driven scaling initialization: scale={getattr(self.model, 'frequency_scale_init', 2.0)}, bias={getattr(self.model, 'frequency_bias_init', 0.5)}")
         self.logger.info("  - Range expansion penalties added to loss function")
+    
+    def set_normalization_params(self, params: dict):
+        """Set normalization parameters from external source for consistency."""
+        if hasattr(self.model, 'set_normalization_params'):
+            self.model.set_normalization_params(params)
+            self.logger.info("Model normalization parameters synchronized")
+        else:
+            self.logger.warning("Model does not support normalization parameter synchronization")
     
     def _check_prediction_range(self) -> bool:
         """
@@ -248,7 +257,7 @@ class SharedLSTMTrainer:
             self.logger.warning(f"  [WARNING] Could not check prediction ranges: {e}")
             return False
     
-    def train_epoch(self) -> Dict[str, float]:
+    def train_epoch(self, epoch: int = 0) -> Dict[str, float]:
         """Train for one epoch."""
         self.model.train()
         total_loss = 0.0
@@ -309,9 +318,9 @@ class SharedLSTMTrainer:
                 for freq in frequency_true_normalized
             ], dtype=torch.float32).to(self.device)
             
-            # Compute loss
+            # Compute loss with epoch for variance penalty activation
             loss = self.criterion(magnitude_pred.squeeze(), frequency_pred.squeeze(),
-                                magnitude_true, frequency_true)
+                                magnitude_true, frequency_true, epoch)
             
             # Backward pass
             self.optimizer.zero_grad()
@@ -394,8 +403,49 @@ class SharedLSTMTrainer:
                 scale_grad = self.model.frequency_scale.grad.item() if self.model.frequency_scale.grad is not None else 0.0
                 bias_grad = self.model.frequency_bias.grad.item() if self.model.frequency_bias.grad is not None else 0.0
                 
-                self.logger.info(f"  Frequency scaling: scale={scale_value:.4f}, bias={bias_value:.4f}")
-                self.logger.info(f"  Frequency gradients: scale_grad={scale_grad:.6f}, bias_grad={bias_grad:.6f}")
+            self.logger.info(f"  Frequency scaling: scale={scale_value:.4f}, bias={bias_value:.4f}")
+            self.logger.info(f"  Frequency gradients: scale_grad={scale_grad:.6f}, bias_grad={bias_grad:.6f}")
+            
+            # NEW: Log prediction/target std ratio for monitoring range coverage
+            if hasattr(self.train_loader.dataset, 'target_stats'):
+                target_mag_std = self.train_loader.dataset.target_stats.get('magnitude_std', 1.0)
+                target_freq_std = self.train_loader.dataset.target_stats.get('frequency_std', 1.0)
+                
+                mag_std_ratio = mag_std / target_mag_std if target_mag_std > 0 else 0.0
+                freq_std_ratio = freq_std / target_freq_std if target_freq_std > 0 else 0.0
+                
+                self.logger.info(f"  Std ratios - Mag: {mag_std_ratio:.3f}, Freq: {freq_std_ratio:.3f}")
+                
+                # NEW: Attention monitoring for multi-head attention models
+                if hasattr(self.model, 'attention') and hasattr(self.model.attention, 'q_proj'):
+                    # Log attention weights for a sample batch
+                    with torch.no_grad():
+                        # Get attention weights for a sample batch
+                        sample_batch = next(iter(self.train_loader))
+                        sample_input = sample_batch[0][:1].to(self.device)  # Take first sample
+                        sample_metadata = sample_batch[2][:1].to(self.device)
+                        
+                        # Forward pass to get attention weights
+                        self.model.eval()
+                        lstm_out, _ = self.model.lstm1(sample_input)
+                        lstm_out, _ = self.model.lstm2(lstm_out)
+                        
+                        # Get attention weights
+                        q = self.model.attention.q_proj(lstm_out)
+                        k = self.model.attention.k_proj(lstm_out)
+                        scores = torch.matmul(q, k.transpose(-2, -1)) * self.model.attention.scale
+                        attn_weights = F.softmax(scores, dim=-1)
+                        
+                        # Calculate head specialization (variance across heads)
+                        head_specialization = torch.std(attn_weights, dim=1).mean().item()
+                        self.logger.info(f"  Attention head specialization: {head_specialization:.4f}")
+                        
+                        # Log attention weights for first few timesteps
+                        if epoch % 5 == 0:  # Log every 5 epochs to avoid spam
+                            attn_sample = attn_weights[0, 0, :5, :5].detach().cpu().numpy()
+                            self.logger.info(f"  Attention weights sample (first 5x5):\n{attn_sample}")
+                        
+                        self.model.train()
                 
                 # Warn if scaling parameters are not learning (stuck at initialization)
                 if abs(scale_value - 5.0) < 0.01 and abs(bias_value - 1.0) < 0.01:
@@ -423,7 +473,7 @@ class SharedLSTMTrainer:
             'frequency_corr': avg_frequency_corr
         }
     
-    def validate_epoch(self) -> Dict[str, float]:
+    def validate_epoch(self, epoch: int = 0) -> Dict[str, float]:
         """Validate for one epoch."""
         self.model.eval()
         total_loss = 0.0
@@ -479,9 +529,9 @@ class SharedLSTMTrainer:
                 # 🔧 NEW: Collect raw frequency targets for range analysis
                 all_freq_targets.append(frequency_true.detach().cpu())
                 
-                # Compute loss
+                # Compute loss with epoch for variance penalty activation
                 loss = self.criterion(magnitude_pred.squeeze(), frequency_pred.squeeze(),
-                                    magnitude_true, frequency_true)
+                                    magnitude_true, frequency_true, epoch)
                 
                 # Get loss components
                 loss_components = self.criterion.get_loss_components(
@@ -587,10 +637,10 @@ class SharedLSTMTrainer:
             self.current_epoch = epoch + 1
             
             # Training
-            train_metrics = self.train_epoch()
+            train_metrics = self.train_epoch(epoch)
             
             # Validation
-            val_metrics = self.validate_epoch()
+            val_metrics = self.validate_epoch(epoch)
             
             # 🔧 IMPROVEMENT: Store enhanced metrics
             self.train_losses.append(train_metrics['loss'])
@@ -632,7 +682,15 @@ class SharedLSTMTrainer:
             # 🔧 IMPROVEMENT: Step the scheduler (CosineAnnealingWarmRestarts doesn't need validation loss)
             self.scheduler.step()
             
-            # 🔧 REFACTOR: Dynamic beta weight update removed (disabled in loss function)
+            # 🔧 NEW: β annealing - gradually increase frequency weight from 2.0 -> 3.0 over training
+            if hasattr(self.criterion, 'frequency_weight'):
+                base_freq_weight = 2.0
+                max_freq_weight = 3.0
+                annealed_weight = base_freq_weight + (epoch / max_epochs) * (max_freq_weight - base_freq_weight)
+                self.criterion.frequency_weight = annealed_weight
+                
+                if epoch % 10 == 0:  # Log every 10 epochs
+                    self.logger.info(f"  β annealing: frequency_weight = {annealed_weight:.3f}")
             
             # Early stopping check
             if val_metrics['total_loss'] < self.best_val_loss:

@@ -563,8 +563,10 @@ class QuadtreeBinner:
                 if count < self.merge_threshold:
                     all_meet_threshold = False
                     print(f"  ❌ Bin {i}: {width:.2f}° lon × {height:.2f}° lat, {count} events (below threshold)")
+                    print(f"      Coordinates: lon[{b[0]:.12f}, {b[1]:.12f}], lat[{b[2]:.12f}, {b[3]:.12f}]")
                 else:
                     print(f"  ✅ Bin {i}: {width:.2f}° lon × {height:.2f}° lat, {count} events")
+                    print(f"      Coordinates: lon[{b[0]:.12f}, {b[1]:.12f}], lat[{b[2]:.12f}, {b[3]:.12f}]")
             
             if all_meet_threshold:
                 print("🎉 All bins meet threshold!")
@@ -591,6 +593,7 @@ class QuadtreeBinner:
             count = np.sum(bin_mask)
             bin_ids[bin_mask] = bin_id
             print(f"  Bin {bin_id}: {count} earthquakes")
+            print(f"      Coordinates: lon[{min_lon:.12f}, {max_lon:.12f}], lat[{min_lat:.12f}, {max_lat:.12f}]")
         
         unassigned = np.sum(bin_ids == -1)
         if unassigned > 0:

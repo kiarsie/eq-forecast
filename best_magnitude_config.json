@@ -34,3 +34,4 @@
   "tuning_notes": "This configuration achieved the highest magnitude prediction range (1.52) by:\n- Increasing frequency_scale_init from 10.0 to 15.0\n- Increasing frequency_bias_init from 2.0 to 3.0\n- Increasing scaling_lr_multiplier from 20 to 25\n- Increasing scaling_wd_multiplier from 3 to 6\n- Keeping magnitude_weight at 2.0 for strong magnitude focus"
 }
 
+

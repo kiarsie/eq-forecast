@@ -784,7 +784,7 @@ class QuadtreeModelTrainer:
         """
         Calculate Weighted Mean Absolute Percentage Error (WMAPE).
         
-        WMAPE = (Σ|A - F|) / (Σ|A|) * 100
+        WMAPE = (sum|A - F|) / (sum|A|) * 100
         
         Args:
             actuals: Actual values
